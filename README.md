@@ -240,9 +240,22 @@ agent.ctx.systemPrompt.section({
 | `maxChars` | `800` | 注入段长度上限 |
 | `order` | `10` | section 排序 |
 | `audit` | `true` | 是否写入 `ledger.jsonl` |
+| `judgeProvider` | **空（自动）** | 事件判定用的 provider。**留空 = 自动跟随当前会话的模型** |
+| `judgeModel` | **空（自动）** | 事件判定用的 model。同上 |
+
+### 关于 `judgeProvider` / `judgeModel`
+
+**留空是推荐配置**：插件会读取当前 agent 的 `options.provider` / `options.model`，
+也就是你此刻正在用的那个模型。你换模型，判定通道自动跟着换。
+
+只有在想让判定**固定走某个通道**（比如前台用强模型、判定用便宜快模型）时才需要显式填写。
+
+> 0.2.0 的这两个默认值是空字符串，而且代码直接把空串传给了 `ctx.llm.stream()`，
+> 导致每轮抛 `NO_ADAPTER`、判定永远走降级路径 —— 用户以为在用模型判定，
+> 实际一直跑在规则上。0.2.2 起改为自动继承。
 
 `statePath` 未设置时的解析顺序：
-`$DSH_HOME` → `$XDG_DATA_HOME` → `~/.local/share`。
+宿主 `dsh-home-paths` 的 `defaultDshHome()` → `$DSH_HOME` → `~/.dsh`。
 
 ## 标定参考
 

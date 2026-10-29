@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.2.2
+
+Addresses the v0.2.0 audit. Three functional defects, all verified by test.
+
+### N1 — model judging never actually ran (high)
+
+`judgeProvider` / `judgeModel` defaulted to empty strings, and those empty strings
+were passed straight to `ctx.llm.stream()`, which throws `NO_ADAPTER` for an
+unregistered provider. Every turn fell through to the rule fallback, so the
+advertised 91% was really 68% — silently.
+
+The judge now **inherits the current agent's model** (`agent.options.provider` /
+`agent.options.model`), so switching models switches the judge automatically.
+Explicit config still wins when you want to pin a channel. Documented in the
+config table, where it was previously missing entirely.
+
+### N2 — lost update on concurrent turns (high)
+
+Judging became async, so `turn/end` handlers could overlap: two turns both read
+the shared `state` snapshot, and the later write clobbered the earlier one.
+Reproduced with 30ms/5ms delays — only one turn's effect survived. State updates
+now run through a serial promise chain (same pattern as `persistChain`).
+0.1.x had no such race because it was fully synchronous.
+
+### Bond channel was unreachable, so good relationships never warmed (high)
+
+`BOND_THRESHOLD = 0.30` filtered out **every real warm event**:
+"谢谢你陪我" 0.226, "你真好" 0.170, "我今天升职了" 0.202, repair 0.202. Only
+"我很喜欢你" (0.399) ever passed. A user who was consistently kind saw zero
+change after 200 turns; the persona could only move in the negative direction.
+
+Admission is now by **event kind** (`support` / `intimacy` / `repair` /
+`achievement`) with a low 0.05 floor that only filters noise. Magnitude decides
+*how much* to move, not *whether* to move.
+
+Measured: 200 warm turns → `warmth +0.212`, `guardedness −0.071`.
+
+### Fallback path quality
+
+The degraded path scored 68% and made directional errors: "我其实很害怕"
+(vulnerability — a high-value intimacy signal) was classified as `conflict`
+(negative valence), so a user opening up made the persona more guarded.
+
+Fallback now orders: explicit conflict phrasing → intimate topics → vulnerability
+expressions → positive hints → negative hints → repair → routine. 69% → **77%**,
+and no intimacy case maps to a negative kind.
+
+### Tests
+
+`src/e2e.js` gained the two assertions whose absence let these through:
+
+- **positive channel**: 200 warm turns must raise `warmth` by > 0.02
+- **fallback accuracy**: a deliberately-broken classifier must still score ≥ 60%
+
+The old "accuracy" check only counted rule-covered items and skipped everything
+routed to the LLM — which is exactly how a permanently-failing judge went
+unnoticed.
+
+### Minor
+
+- cache is now a real LRU (was FIFO while calling itself LRU)
+- dropped `再见` / `拜拜` / `在吗` from the silent-word table — a farewell or a
+  "are you there?" opener can be significant; they should not be zero-cost routine
+- removed dead `cwdCmp` code in the exclusion check
+
 ## 0.2.1
 
 - Fix: `@deepseek-ai/dsh-home-paths` was imported statically but never declared

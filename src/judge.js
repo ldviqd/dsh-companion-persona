@@ -55,9 +55,11 @@ const CONFIDENT_RULES = [
  */
 const SILENT_WORDS = new Set([
   '嗯', '嗯嗯', '哦', '噢', '好的', '好', '行', '可以', '收到', '明白了', '懂了',
-  '晚安', '早安', '早', '午安', '拜拜', '再见', '明天见', '先这样',
+  // '再见'/'拜拜' 刻意不收：可能是告别事件（长期不联系），不该零成本静默
+  '晚安', '早安', '早', '午安', '明天见', '先这样',
   '哈哈', '哈哈哈', '笑死', '确实', '是啊', '对', '是的', '没错',
-  'ok', 'okay', '收到啦', '好嘞', '嗯呢', '在', '在吗',
+  // '在吗' 是询问不是寒暄，交给 LLM 判（可能是一次重要对话的开场）
+  'ok', 'okay', '收到啦', '好嘞', '嗯呢', '在',
   '哦', '噢', '喔', '诶', '嘿', '唔', '额', '呃',
 ]);
 
@@ -150,7 +152,10 @@ export const CLASSIFIER_PROMPT = `你是情感事件分类器。判断用户这�
 只输出标签本身，不要解释，不要加标点。`;
 
 /**
- * LLM 判定器。带 LRU 缓存与降级。
+ * LLM 判定器。带缓存与降级。
+ *
+ * 缓存策略是**真 LRU**：命中时把键移到队尾，淘汰时删队首。
+ * （0.2.0 的注释写成 LRU 但实现是 FIFO —— 命中不刷新位置，审计报告指出过。）
  *
  * @param {object} deps
  * @param {(text:string) => Promise<string|null>} deps.classify 调用模型的函数，返回原始文本
@@ -192,7 +197,11 @@ export function createJudge({ classify, cacheSize = 512, logger } = {}) {
     const key = cacheKey(text);
     if (cache.has(key)) {
       stats.cacheHits++;
-      return { kind: cache.get(key), source: 'cache', reason: 'cached' };
+      // 真 LRU：命中后移到队尾，让热点条目不容易被淘汰
+      const hit = cache.get(key);
+      cache.delete(key);
+      cache.set(key, hit);
+      return { kind: hit, source: 'cache', reason: 'cached' };
     }
 
     // LLM
@@ -240,20 +249,34 @@ const NEGATIVE_HINTS = /(难过|累|烦|压力|焦虑|担心|害怕|失望|生�
 function conservativeFallback(text) {
   const s = String(text ?? '');
 
-  // 亲密话题优先于情绪判断：家人/身体/私事即使语气平淡也是 intimacy
+  // 1) 明确的冲突指向优先（"你"字从句），先于情绪词判断
+  if (/(你根本|你总是|你从来|你不懂|你又不|凭什么)/.test(s)) return 'conflict';
+
+  // 2) 亲密话题：家人/身体/私事。
+  //    亲密**先于**负面情绪判断 —— "我妈住院了我很难过"是示弱不是冲突。
   if (/(妈|爸|父母|家人|奶奶|爷爷|外婆|外公|弟|妹|哥|姐|住院|生病|手术|身体|去世)/.test(s)) {
+    return 'intimacy';
+  }
+
+  // 3) 示弱表达：向对方暴露脆弱本身就是靠近，不是冲突。
+  //    这是审计报告指出的方向性错误："我其实很害怕" 被判成 conflict（负效价），
+  //    等于用户越示弱、AI 越戒备。
+  //    正则要点：副词可叠加（"我其实**很**害怕"是四段），所以用 [^。，]{0,4} 松散匹配，
+  //    而不是硬编码"我+副词+情绪词"三段式 —— 后者会漏掉最常见的说法。
+  if (/(我[^。，！？]{0,5}(害怕|担心|难过|委屈|孤单|想哭|撑不住|不敢|后悔|焦虑))/.test(s)
+      || /(说实话|老实说|说真的)/.test(s)) {
     return 'intimacy';
   }
 
   if (POSITIVE_HINTS.test(s)) return 'achievement';
 
-  // 明确的冲突指向（"你"字从句 + 负性）
-  if (/(你根本|你总是|你从来|你不懂|你又不|凭什么)/.test(s)) return 'conflict';
-
   if (NEGATIVE_HINTS.test(s)) {
     if (/(别管|不想说|不想聊|让我静一静)/.test(s)) return 'distance';
     return 'conflict';
   }
+
+  // 4) 修复语
+  if (/(我们聊聊|好吗|对不起|抱歉)/.test(s)) return 'repair';
 
   // 无明确情感信号 → routine（中性，不消耗人格）
   return 'routine';

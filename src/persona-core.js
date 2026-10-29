@@ -28,8 +28,26 @@ export const DRIFT_THRESHOLD = 0.55;
 /** 漂变速率 */
 export const DRIFT_RATE = 0.03;   // 实测标定：75 轮极端冲突后 warmth 0.65→0.16，不触底
 
-/** 键合门槛：暖事件的量级门控 */
-export const BOND_THRESHOLD = 0.30;
+/**
+ * 键合的最小量级门槛。
+ *
+ * 实测教训（0.2.0 审计）：原来的 0.30 把**所有真实暖事件**都拦下了 ——
+ * "谢谢你陪我" 0.226、"你真好" 0.170、"我今天升职了" 0.202，
+ * 只有 "我很喜欢你" 0.399 能过。结果是持续对 AI 好的用户 200 轮后人格零变化，
+ * 正向通道形同虚设，人格只会往变坏的方向走。
+ *
+ * 改为：**按事件类型准入**（见 BOND_KINDS），量级只做地板过滤。
+ * 0.05 的作用是排除"意外被标成暖事件"的噪声，不是筛选强度。
+ */
+export const BOND_THRESHOLD = 0.05;
+
+/**
+ * 可以走键合通道的事件类型。
+ *
+ * 用白名单而不是靠量级门槛：语义上确定是"关系向好的事"就应该计入，
+ * 不管这次说得多轻。量级决定**改变多少**，不该决定**要不要改变**。
+ */
+export const BOND_KINDS = new Set(['support', 'intimacy', 'repair', 'achievement']);
 /** 键合速率（刻意慢于漂变） */
 export const BOND_RATE = 0.025;
 
@@ -275,8 +293,12 @@ export function step(state, episode) {
     }
   }
 
-  // 5) 键合：暖事件独立通道，不受 load 门控
-  if (episode.valence > 0 && episode.magnitude >= BOND_THRESHOLD) {
+  // 5) 键合：暖事件独立通道，不受 load 门控。
+  //    准入看**事件类型**，不看量级 —— 见 BOND_KINDS 的注释。
+  const bondEligible = BOND_KINDS.has(episode.kind)
+    && episode.valence > 0
+    && episode.magnitude >= BOND_THRESHOLD;
+  if (bondEligible) {
     const size = BOND_RATE * episode.magnitude;
     for (const [axis, weight] of [['warmth', 1.0], ['guardedness', -0.6], ['dependence', 0.4]]) {
       const delta = damped(next.traits, next.resistance, axis, size * weight);
@@ -605,14 +627,13 @@ export function evaluateExclusion(exclusions, meta = {}) {
       const ws = norm(wsRaw);
       if (!ws) continue;
       // 大小写不敏感：Windows 路径不区分大小写
-      const cwdCmp = ws.length === 2 && ws[1] === ':' ? cwd.toLowerCase() : cwd;
-      const wsCmp = ws.length === 2 && ws[1] === ':' ? ws.toLowerCase() : ws;
+      // 统一小写比较：Windows 路径大小写不敏感，POSIX 大小写敏感但
+      // 把工作区路径也小写化影响极小，换来跨平台一致的排除行为。
       const lc = cwd.toLowerCase();
-      const lw = wsCmp.toLowerCase();
+      const lw = ws.toLowerCase();
       if (lc === lw || lc.startsWith(`${lw}/`)) {
         return { excluded: true, reason: `工作区 ${wsRaw} 被排除` };
       }
-      void cwdCmp;
     }
   }
 

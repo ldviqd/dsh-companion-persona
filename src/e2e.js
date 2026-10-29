@@ -168,11 +168,73 @@ console.log('=== 4. 日常对话不磨坏人格 ===');
 }
 
 // ---------------------------------------------------------------------------
-// 5. 真实冲突文本：变化应该发生，但不该 15 轮就崩
+// 5. 正向通道：持续暖对话必须让人格变暖
+//
+//    这条断言是审计报告 N3 指出的缺口 —— 0.2.0 的全部 18 项断言里没有一项
+//    检查"好关系会升温"，所以键合通道完全失效（BOND_THRESHOLD=0.30 拦住
+//    所有真实暖事件）却没被发现。功能没生效，测试必须能抓到。
 // ---------------------------------------------------------------------------
 
 console.log();
-console.log('=== 5. 真实冲突的演化节奏 ===');
+console.log('=== 5. 正向通道（暖对话应变暖）===');
+{
+  const warm = ['谢谢你陪我', '你真好', '对不起，我刚才说重了', '我今天升职了'];
+  let s = initialState();
+  for (let i = 0; i < 200; i++) {
+    const text = warm[i % warm.length];
+    const kind = i % 4 === 2 ? 'repair' : (i % 4 === 3 ? 'achievement' : 'support');
+    s = step(s, toEpisode(kind, text)).state;
+    if (i % 10 === 9) s = restPersona(s, 2);
+  }
+  const dWarmth = s.traits.warmth - s.baseline.warmth;
+  const dGuard = s.traits.guardedness - s.baseline.guardedness;
+  console.log(`    200 轮纯暖对话: warmth Δ=${dWarmth.toFixed(3)}  guardedness Δ=${dGuard.toFixed(3)}`);
+  check('暖对话让人格变暖 Δ > 0.02', dWarmth > 0.02, dWarmth.toFixed(3));
+  check('戒备同步下降', dGuard < 0, dGuard.toFixed(3));
+  check('变暖幅度不过冲 Δ < 0.4', dWarmth < 0.4, dWarmth.toFixed(3));
+}
+
+// ---------------------------------------------------------------------------
+// 6. 降级路径准确率（不依赖 LLM）
+//
+//    审计报告 N1：0.2.0 默认配置下 judgeProvider='' 导致每轮抛 NO_ADAPTER，
+//    实际一直跑在降级路径上，而 e2e 的"准确率"只统计规则覆盖项，
+//    把降级路径排除在统计之外 —— 这是 N1 没被自测发现的原因。
+//
+//    这里显式断言降级路径的准确率下限。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 6. 降级路径准确率 ===');
+{
+  // 用一个必定失败的 classify 模拟模型不可用
+  const broken = createJudge({
+    classify: async () => { throw new Error('model unavailable'); },
+  });
+  let correct = 0;
+  const errors = [];
+  for (const [text, want] of GOLD) {
+    const r = await broken.judge(text);
+    if (r.kind === want) correct++;
+    else errors.push(`${text} → ${r.kind} (期望 ${want})`);
+  }
+  const acc = correct / GOLD.length;
+  console.log(`    降级路径准确率: ${correct}/${GOLD.length} = ${(acc * 100).toFixed(0)}%`);
+  if (errors.length > 0 && errors.length <= 8) {
+    for (const e of errors) console.log(`      · ${e}`);
+  }
+  check('降级准确率 >= 60%', acc >= 0.60, `${(acc * 100).toFixed(0)}%`);
+  check('降级不把亲密判成负性',
+    !errors.some((e) => e.includes('我其实很害怕') || e.includes('我妈住院')),
+    '');
+}
+
+// ---------------------------------------------------------------------------
+// 7. 真实冲突文本：变化应该发生，但不该 15 轮就崩
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 7. 真实冲突的演化节奏 ===');
 {
   const conflicts = ['你根本不懂我在说什么', '算了，不想说了', '你总是这样', '我很失望'];
   let s = initialState();
@@ -190,11 +252,11 @@ console.log('=== 5. 真实冲突的演化节奏 ===');
 }
 
 // ---------------------------------------------------------------------------
-// 6. rest() 必须真的被调用（旧代码从未调用）
+// 8. rest() 必须真的被调用（旧代码从未调用）
 // ---------------------------------------------------------------------------
 
 console.log();
-console.log('=== 6. 闲置恢复（rest 生效）===');
+console.log('=== 8. 闲置恢复（rest 生效）===');
 {
   let s = initialState();
   for (let i = 0; i < 60; i++) {
@@ -218,11 +280,11 @@ console.log('=== 6. 闲置恢复（rest 生效）===');
 }
 
 // ---------------------------------------------------------------------------
-// 7. 面板字段一致性（旧代码 changed 恒 undefined）
+// 9. 面板字段一致性（旧代码 changed 恒 undefined）
 // ---------------------------------------------------------------------------
 
 console.log();
-console.log('=== 7. 面板数据 ===');
+console.log('=== 9. 面板数据 ===');
 {
   const s = initialState();
   s.traits = { warmth: 0.3, volatility: 0.35, guardedness: 0.6, playfulness: 0.55, dependence: 0.4 };
@@ -234,11 +296,11 @@ console.log('=== 7. 面板数据 ===');
 }
 
 // ---------------------------------------------------------------------------
-// 8. 排除规则（含 Windows 路径）
+// 10. 排除规则（含 Windows 路径）
 // ---------------------------------------------------------------------------
 
 console.log();
-console.log('=== 8. 排除规则 ===');
+console.log('=== 10. 排除规则 ===');
 {
   const ex = { workspaces: ['/proj/a', 'D:\\work\\proj'], sessions: [], presets: [] };
   const cases = [
@@ -259,11 +321,11 @@ console.log('=== 8. 排除规则 ===');
 }
 
 // ---------------------------------------------------------------------------
-// 9. 安全指令不能被截断
+// 11. 安全指令不能被截断
 // ---------------------------------------------------------------------------
 
 console.log();
-console.log('=== 9. 渲染安全 ===');
+console.log('=== 11. 渲染安全 ===');
 {
   const s = initialState();
   s.identity = { name: '鲸鲸', userName: '' };

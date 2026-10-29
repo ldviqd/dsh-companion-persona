@@ -139,19 +139,70 @@ export async function apply(ctx, config) {
   let persistChain = Promise.resolve();
 
   /**
+   * 状态更新的串行队列。
+   *
+   * 为什么必须串行：判定是异步的（要调模型）。如果两轮判定重叠，
+   * 后完成的那轮会因为读的是一份过期的 state 快照而覆盖先完成的写入
+   * （lost update）。实测：两轮并发后 load 只剩后一轮的结果。
+   *
+   * 0.1.x 是同步处理所以没这个问题 —— 这是引入 LLM 判定时带入的回归。
+   */
+  let stateChain = Promise.resolve();
+  const withStateLock = (fn) => {
+    const run = stateChain.then(fn, fn);
+    // 吞掉异常，避免一次失败就让整条链断掉
+    stateChain = run.catch(() => {});
+    return run;
+  };
+
+  /**
    * 事件判定器。
    *
    * 走宿主 llm 服务而不是自建 HTTP 客户端：provider/模型/回退链全部由 DSH 管理，
    * 限流时宿主会自己降级，插件不需要重复实现那套。
    */
+  /**
+   * 各 agent 的模型路由。
+   *
+   * 为什么不写死配置项：默认空串会让 ctx.llm.stream({provider:'', model:''})
+   * 每轮抛 NO_ADAPTER，判定永远走降级 —— 用户以为开了 LLM 判定，实际一直是规则。
+   * 实测过这个"静默失效"，比报错更糟。
+   *
+   * 正确来源是 agent.options：那就是这个 agent 当前真正在用的 provider/model，
+   * 用户换模型时自动跟随，不需要改插件配置。
+   */
+  const agentRoutes = new WeakMap();
+  const routeByAgentId = new Map();
+
+  /** 解析本次判定该用哪个路由：显式配置 > 当前 agent > 任意已知 agent > 让宿主默认 */
+  function pickRoute(agentHint) {
+    // 1) 显式配置优先（用户想固定判定通道时用）
+    if (config.judgeProvider && config.judgeModel) {
+      return { provider: config.judgeProvider, model: config.judgeModel };
+    }
+    // 2) 当前 session 所属 agent 的路由
+    const sid = typeof agentHint === 'string' ? agentHint : agentHint?.sessionId;
+    if (sid && routeByAgentId.has(sid)) {
+      const r = routeByAgentId.get(sid);
+      if (r?.provider && r?.model) return r;
+    }
+    // 3) 任意已知 agent（单用户部署下通常只有一个）
+    for (const r of routeByAgentId.values()) {
+      if (r?.provider && r?.model) return r;
+    }
+    return null;
+  }
+
   const judge = createJudge({
-    classify: async (text) => {
-      // ctx.llm.stream() 是宿主唯一的一等调用入口（带 provider 路由与回退）。
-      // GenerateOptions 必须显式给 provider/model —— 这里用插件自己配置的通道，
-      // 与主对话模型解耦：即使前台换了模型，判定通道也保持稳定。
+    classify: async (text, agentHint) => {
+      const route = pickRoute(agentHint);
+      if (!route) {
+        throw new Error('no model route available for judging');
+      }
+      // ctx.llm.stream() 是宿主唯一的一等调用入口，带 provider 路由与回退。
       const chunks = ctx.llm.stream({
-        provider: config.judgeProvider,
-        model: config.judgeModel,
+        provider: route.provider,
+        model: route.model,
         system: CLASSIFIER_PROMPT,
         messages: [{ role: 'user', content: [{ type: 'text', text }] }],
         maxTokens: 16,
@@ -179,6 +230,16 @@ export async function apply(ctx, config) {
   const registerSection = (agent) => {
     if (!agent?.ctx || sectioned.has(agent)) return;
     sectioned.add(agent);
+    // 记录该 agent 的模型路由（判定通道跟随它）
+    try {
+      const opt = agent.options ?? {};
+      const route = { provider: opt.provider, model: opt.model, reasoningEffort: opt.reasoningEffort };
+      if (route.provider && route.model) {
+        agentRoutes.set(agent, route);
+        const id = agent.session?.id;
+        if (typeof id === 'string') routeByAgentId.set(id, route);
+      }
+    } catch { /* options 不可读时忽略，走 fallback 路由 */ }
     try {
       const agentCtx = agent.ctx;
       const disposer = agentCtx.systemPrompt.section({
@@ -240,6 +301,12 @@ export async function apply(ctx, config) {
 
     const text = userTexts[userTexts.length - 1];
 
+    // 找到这个 session 对应的 agent，让判定走它当前在用的模型
+    let agentHint = null;
+    try {
+      agentHint = typeof session.id === 'string' ? session.id : null;
+    } catch { /* 忽略 */ }
+
     // 排除判定：某些会话不参与人格形成（工作区 / 单会话 / preset / subagent）
     let header = {};
     try { header = session.header ?? {}; } catch { header = {}; }
@@ -274,8 +341,9 @@ export async function apply(ctx, config) {
 
     // 判定是异步的（可能调模型）。turn/end 监听器不 await，
     // 所以人格变化在下一轮生效 —— 这符合直觉，也不阻塞对话。
-    void (async () => {
-      const verdict = await judge.judge(text);
+    // 用 withStateLock 串行化：await 前后跨共享 state 必须串行，否则丢更新。
+    void withStateLock(async () => {
+      const verdict = await judge.judge(text, agentHint);
       const kind = verdict.kind;
       if (!kind) return;
 

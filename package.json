@@ -1,0 +1,49 @@
+{
+  "name": "dsh-companion-persona",
+  "version": "0.1.0",
+  "description": "Long-term companion persona for DSH: trait dynamics, drift and catastrophe mutation, injected as a scoped system-prompt section.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "persona",
+    "companion",
+    "chatbot",
+    "character",
+    "trait",
+    "agent"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "src",
+    "README.md",
+    "README.zh.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  }
+}

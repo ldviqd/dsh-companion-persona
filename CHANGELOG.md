@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.1
+
+- Fix: `@deepseek-ai/schemastery` moved from `peerDependencies` to `dependencies`.
+  As a peer, a fresh `npm install` left it unresolved and the plugin failed to load.
+- Add `repository`, `homepage`, `bugs` metadata.
+
+## 0.1.0 — 2026-10-29
 
 First public version.
 

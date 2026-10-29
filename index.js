@@ -13,7 +13,6 @@
 import Schema from '@deepseek-ai/schemastery';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { defaultDshHome } from '@deepseek-ai/dsh-home-paths';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 
 import {
@@ -64,7 +63,10 @@ function resolveStatePath(config, ctx) {
   // 自己拼路径会在 Windows 上落到错误的位置，也会和 DSH 其它数据脱节。
   // 该包是纯函数集合，不是注入服务 —— 直接 import 即可。
   try {
-    const h = defaultDshHome();
+    // 动态解析：该包在 DSH 运行时必然存在；作为独立 npm 包安装时可能缺席，
+    // 那时退回环境变量也不会出错。用同步 require 走 Node 的 CJS 桥。
+    const mod = globalThis.__personaHomePaths ?? null;
+    const h = mod?.defaultDshHome?.();
     if (typeof h === 'string' && h.length > 0) {
       return join(h, STATE_DIR_NAME, 'state.json');
     }
@@ -120,6 +122,13 @@ async function loadState(file) {
 }
 
 export async function apply(ctx, config) {
+  // 尝试加载宿主的 home 解析包（可选依赖）。
+  // 失败完全无损：resolveStatePath 会退回 DSH_HOME / ~/.dsh。
+  if (!globalThis.__personaHomePaths) {
+    try {
+      globalThis.__personaHomePaths = await import('@deepseek-ai/dsh-home-paths');
+    } catch { /* 独立安装场景，忽略 */ }
+  }
   const statePath = resolveStatePath(config, ctx);
   const logger = ctx.logger?.('companion-persona');
   let state = await loadState(statePath);

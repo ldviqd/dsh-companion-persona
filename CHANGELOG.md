@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1
+
+- Fix: `@deepseek-ai/dsh-home-paths` was imported statically but never declared
+  as a dependency, so a fresh `npm install` crashed on load with
+  `Cannot find package`. It is now an **optional peer dependency** resolved at
+  plugin start; if absent, the state path falls back to `$DSH_HOME` / `~/.dsh`.
+  (It has no stable release on npm — only `rc`/`alpha` tags — so pinning it as a
+  regular dependency would break installs.)
+
 ## 0.2.0
 
 Signal layer rewritten. The old rule-only extractor scored **45%** on a 22-item

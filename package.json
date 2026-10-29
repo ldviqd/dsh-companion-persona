@@ -1,6 +1,6 @@
 {
   "name": "dsh-companion-persona",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Long-term companion persona for DSH: trait dynamics, drift and catastrophe mutation, injected as a scoped system-prompt section.",
   "keywords": [
     "dsh",
@@ -48,5 +48,13 @@
   "bugs": {
     "url": "https://github.com/ldviqd/dsh-companion-persona/issues"
   },
-  "homepage": "https://github.com/ldviqd/dsh-companion-persona#readme"
+  "homepage": "https://github.com/ldviqd/dsh-companion-persona#readme",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-home-paths": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-home-paths": {
+      "optional": true
+    }
+  }
 }

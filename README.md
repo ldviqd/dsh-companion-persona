@@ -1,181 +1,172 @@
 # dsh-companion-persona
 
-A long-term companion persona plugin for [DSH](https://github.com/deepseek-ai/dsh).
+中文 | [English](README.en.md)
 
-Most "AI character" setups are a fixed prompt: the character says the same things on day
-one and day three hundred. This plugin gives the persona **a state that actually changes** —
-slowly, in response to what happens between you, and occasionally in a single irreversible
-jump.
+给 [DSH](https://github.com/deepseek-ai/dsh) 用的长期陪伴型人格插件。
+
+多数「AI 角色」是一段固定提示词：第一天和第三百天说的话一模一样。这个插件给角色
+**一个真正会变的状态** —— 慢慢变，由你们之间发生的事驱动，偶尔一次不可逆的跳变。
 
 ```
-Day 1     she's warm, easy to joke with, asks a lot of questions
-Day 300   she's quieter now. still kind. doesn't volunteer much about herself.
+第 1 天    温和、爱开玩笑、话很多
+第 300 天  安静了些。还是善意，但不太主动讲自己的事。
 ```
 
-Nothing was rewritten. It drifted.
+没有人改写它。它是漂移过去的。
 
 ---
 
-## What makes it different
+## 它和别的做法有什么不同
 
-### 1. Persona is not the same thing as relationship
+### 1. 人格 ≠ 关系
 
-A relationship model (closeness, trust, mood) can express *"we are close right now."*
-It cannot express *"she has become a more guarded person than she used to be."*
+关系模型（亲密度、信任、心情）能表达「**我们此刻**很亲近」，
+但表达不了「**它变成了一个更沉默的人**」。
 
-So the persona layer is separate and persistent: five traits that change only through
-narratively significant events. Mood and closeness belong to a different layer (not in v1).
+所以人格是独立持久的一层：五个特质，只随叙事级事件改变。
+心情与亲密度属于另一层（v1 未实现）。
 
-The five axes were chosen because they're **audible in conversation**, not because they
-match the Big Five:
+选这五个轴是因为它们**在对话里能被听见**，不是照搬大五人格：
 
-| Axis | What it controls |
+| 轴 | 控制什么 |
 |---|---|
-| `warmth` | how much it moves toward you |
-| `volatility` | how much small things land |
-| `guardedness` | how much it volunteers |
-| `playfulness` | how readily it jokes |
-| `dependence` | how much it brings to you first |
+| `warmth` 温度 | 主动靠近的程度 |
+| `volatility` 情绪起伏 | 小事的分量 |
+| `guardedness` 戒备 | 主动吐露的程度 |
+| `playfulness` 玩笑 | 开玩笑的门槛 |
+| `dependence` 依赖 | 主动找你说的程度 |
 
-### 2. Change is slow — deliberately
+### 2. 变化是慢的 —— 刻意的
 
-Calibrated so that **the first ~30 turns produce nothing visible**. Around 75 turns of
-real conversation, one or two axes cross the perception threshold:
+标定目标是：**前 30 轮不产生任何可见变化**。约 75 轮真实对话后，一两个轴才越过感知阈值。
 
-| Turns | warmth Δ | Visible change |
+| 轮数 | warmth Δ | 可见变化 |
 |---|---|---|
-| 15 | −0.004 | none |
-| 30 | −0.016 | none |
-| 75 | −0.069 | 2 axes |
-| 90 (extreme conflict) | −0.60 | all 5 |
+| 15 | −0.004 | 无 |
+| 30 | −0.016 | 无 |
+| 75 | −0.069 | 2 个轴 |
+| 90（极端冲突） | −0.60 | 全部 5 个轴 |
 
-If a character changes noticeably in ten messages, it isn't a character — it's a mood.
+十句话就明显变一个人，那不是角色，是心情。
 
-### 3. Catastrophe, not thresholds
+### 3. 突变，而不是阈值
 
-A single "if stress > X, change personality" rule produces caricature: any big event
-flips the character. Real people have a **fold** — they absorb a lot, then one more thing
-breaks something.
+「压力 > X 就改人格」这种单阈值的必然结果是漫画化：任何大事都翻脸。
+真实的人是**折叠**的 —— 忍很多，然后最后一根稻草压断些什么。
 
-This uses a cusp catastrophe. Mutation requires **three conditions at once**:
+这里用尖点突变，突变要求**三个条件同时成立**：
 
 ```js
 shock >= 0.50 && load >= 0.80 && sensitivity >= 0.68
 ```
 
-Verified behaviour:
+已验证的行为：
 
-- one maximum-intensity blow → `load 0.864, sensitivity 0.334` → **no mutation**
-- a second one immediately after → **mutation** (the last straw)
+- 单次最强打击 → `load 0.864, sensitivity 0.334` → **不突变**
+- 紧接着再来一次 → **突变**（最后一根稻草）
 
-### 4. Two channels, not one
+### 4. 两条通道，不是一条
 
-If change is gated only by accumulated load, a calm good relationship **freezes** — it can
-never grow, only decay. So there's a second channel: warm events slowly raise `warmth`
-regardless of load. Slow, but not gated by stress.
+如果变化只由累积负荷门控，平静的好关系会**冻结** —— 只能变坏，不能变好。
+所以有第二条通道：暖事件缓慢提升温度，不受负荷门控。慢，但不会被压力卡住。
 
-| Channel | Trigger | Effect |
+| 通道 | 触发 | 效果 |
 |---|---|---|
-| `drift` | `load > 0.55` | chronic hardening / softening |
-| `bond` | warm event, `magnitude >= 0.30` | gradual warming |
-| `mutation` | all three conditions | large rewrite, directed by event type |
+| `drift` 漂变 | `load > 0.55` | 慢性硬化 / 软化 |
+| `bond` 键合 | 暖事件且 `magnitude >= 0.30` | 缓慢升温 |
+| `mutation` 突变 | 三条件同时 | 大幅改写，按事件类型定向 |
 
-### 5. Valence comes from the event, not just the words
+### 5. 效价来自事件，不只来自字面
 
-**A bug worth documenting.** Early versions scored sentiment from a word list. Plain
-conflict — *"you don't understand me at all"* — contains no negative words, so valence
-computed to `0`, so `strain = magnitude × max(0, −valence) = 0`. **Conflict accumulated
-no load and the persona never changed.** A 22-turn heavily-conflicted conversation produced
-zero drift.
+**一个值得写进文档的 bug。** 早期版本用词表算情感。
+「你根本不懂我在说什么」里没有任何负面词，于是效价算成 `0`，
+于是 `strain = magnitude × max(0, −valence) = 0`。
+**冲突完全不积累负荷，人格永远不变。** 22 轮激烈冲突的对话产生零漂移。
 
-Fix: event *type* carries an emotional floor. Conflict −0.45, betrayal −0.85, loss −0.90,
-repair +0.40. Word-list sentiment can raise it, never lower it.
+修法：事件**类型**自带情感下限。冲突 −0.45、背叛 −0.85、丧失 −0.90、修复 +0.40。
+词表算出更强的情感可以抬高它，但不能压低。
 
-### 6. Signal extraction is rules, not an LLM call
+### 6. 信号抽取用规则，不调模型
 
-Deliberate tradeoff. Calling a model per turn means:
+这是刻意的取舍。每轮调一次模型意味着：
 
-- continuous token cost
-- **the persona stops working whenever the provider rate-limits** — a companion that
-  goes silent because of an API quota is not a companion
+- 持续烧 token
+- **供应商限流时人格直接停摆** —— 因为 API 配额而不说话的陪伴，不是陪伴
 
-Rules are replayable, diffable, free. Most companion signals are structural anyway
-(length, questions, self-disclosure markers).
+规则可回放、可 diff、零成本。而且陪伴场景的信号大多是结构性的
+（长度、是否提问、自我暴露标记）。
 
-**Limitation, stated honestly:** rules miss irony and restrained expression. That's the
-accepted cost — better a persona that changes slowly than one that goes mute.
+**诚实标注局限**：规则在反讽和克制表达上会失手。这是接受的代价 ——
+宁可人格变化慢一点，也不要它在限流时失语。
 
 ---
 
-## Install
+## 安装
 
 ```bash
 dsh plugin add dsh-companion-persona
 ```
 
-Or mount from a local path in your profile's `cordis.patch.yml`:
+或者在你的 profile 的 `cordis.patch.yml` 里从本地路径挂载：
 
 ```yaml
 - id: companion-persona
   name: "/absolute/path/to/dsh-companion-persona/index.js"
   config:
-    name: 小雨          # initial name; editable in the panel afterwards
+    name: 小雨          # 初始名字；之后可在面板里改
     maxChars: 800
 ```
 
-Restart DSH after mounting.
+挂载后重启 DSH。
 
-## Usage
+## 使用
 
-Open **Settings → Persona**.
+打开 **设置 → 人格**。
 
-### Identity
+### 身份
 
-Give it a name, and tell it what to call you. Both are editable live — no restart.
+给它起个名字，并告诉它该怎么称呼你。两者都能即时修改，不需要重启。
 
-- Name empty → renders as *"you are someone with a history"* rather than inventing one
-- User name empty → that line is simply omitted
+- 名字留空 → 渲染成「你是一个有过往的人」，而不是硬编一个
+- 称呼留空 → 那一行直接不出现
 
-### Traits
+### 特质
 
-Five bars with a **baseline tick mark** on each, so you can see how far it has moved from
-where it started.
+五根条，每根上有**基线刻度**，能一眼看出离最初偏了多远。
 
-### Two switches
+### 两个开关
 
-| Switch | When off |
+| 开关 | 关闭后 |
 |---|---|
-| **Inject persona** | the model stops seeing the persona section; state is fully preserved |
-| **Keep evolving** | persona freezes; conversation continues normally |
+| **注入人格段** | 模型看不到人格设定；状态完整保留 |
+| **继续演化** | 人格冻结；对话照常进行 |
 
-They're orthogonal, so there are four combinations. **Freeze evolving** is the useful one:
-it means *"this is who they are now."*
+两者正交，所以有四种组合。**冻结演化**是最有用的那个 ——
+它的意思是「**它现在就是这个人了**」。
 
-There is deliberately **no reset button**. Turning things off stops behaviour; it does not
-erase accumulated history. Wiping a character should be its own explicit action.
+刻意**没有重置按钮**。关掉只是停止行为，不会抹掉积累的历史。
+抹掉一个角色应该是另一个明确的动作。
 
-### Excluding conversations
+### 排除会话
 
-Not every conversation should shape a persona. Work sessions, debugging sessions, and
-subagents would otherwise pollute months of accumulation.
+不是每个对话都该塑造人格。工作会话、调试会话、subagent，
+否则会污染几个月的积累。
 
-| Rule | Granularity |
+| 规则 | 粒度 |
 |---|---|
-| `workspaces` | by `cwd`, whole directory tree |
-| `sessions` | a single session id |
-| `presets` | by agent preset |
+| `workspaces` | 按 `cwd`，整棵目录树 |
+| `sessions` | 单个会话 id |
+| `presets` | 按 agent preset |
 
-Subagent sessions are always excluded — they're tool derivatives, not the relationship.
+subagent 会话**永远排除** —— 它们是工具性派生，不属于这段关系。
 
-Both pickers are dropdowns populated from the live DSH instance; you never type paths or
-UUIDs by hand.
+两个选择器都是下拉框，从运行中的 DSH 实例里取；不需要手输路径或 UUID。
 
-Excluded conversations are still recorded with a reason, so the timeline can explain
-*why* a session didn't count.
+被排除的会话仍会记录原因，所以时间线能解释**为什么**某个会话没算数。
 
-### Timeline
+### 时间线
 
-Every change is appended to `ledger.jsonl`:
+每次变化都追加到 `ledger.jsonl`：
 
 ```json
 {"at":1793177430820,"kind":"conflict","before":{"load":0.31},
@@ -183,100 +174,97 @@ Every change is appended to `ledger.jsonl`:
  "evidence":"你根本不懂我在说什么"}
 ```
 
-The `evidence` field holds the original user message. So you can always answer
-*"why did it become like this"* — which a rewrite-in-place persona model cannot.
+`evidence` 字段存原始用户发言。所以任何时候都能回答
+「**它为什么变成这样**」—— 这是就地重写式的人格模型做不到的。
 
 ---
 
-## How injection works
+## 注入方式
 
-The persona is contributed as a **scoped system-prompt section** — not disguised as a user
-message. The model reads it as *who I am*, not as *something the user said*.
+人格作为 **system prompt 的作用域 section** 注入，不是伪装成用户消息。
+模型把它读作「**我是谁**」，而不是「用户说了什么」。
 
 ```js
 agent.ctx.systemPrompt.section({
   name: 'companion-persona',
-  order: 10,                       // after deployment persona (order 0)
+  order: 10,                       // 在 deployment persona (0) 之后
   text: () => renderPersona(state),
 });
 ```
 
-Two details that matter:
+两个要紧的细节：
 
-- The section is registered per-agent, so it only affects that agent.
-- Sections are rendered at assembly time, so a persona change is visible on the next turn
-  without restarting.
+- section 按 agent 注册，只影响该 agent。
+- section 在装配时渲染，所以人格变化下一轮就生效，不用重启。
 
-## Rendering principle
+## 渲染原则
 
-The prompt describes **changes relative to baseline**, not absolute values:
+提示词描述的是**相对基线的变化**，不是绝对值：
 
 ```
-You are 小雨.
-Compared to who you used to be:
-- keeps things locked up: private details come out only if asked, or not at all.
-- barely reaches out anymore: replies are still appropriate, just no longer warm.
-- hardly jokes: little teasing, flat delivery.
+你是小雨。
+和从前的自己相比：
+- 把心事捂得很紧：私人的细节要问才说，甚至不说。
+- 几乎不再主动亲近：回复依然得体，但不再主动往亲近处走。
+- 几乎不开玩笑：很少调侃，语气偏平实。
 ```
 
-Not `warmth: 0.21`. Absolute numbers make models perform a caricature; relative
-descriptions preserve the sense of *the same person, changed*.
+不是 `warmth: 0.21`。绝对数值会让模型表演漫画；
+相对描述才能保留「**同一个人，变了**」的延续感。
 
-It also says, explicitly: *"these are tendencies, not a costume — never describe your own
-personality, never mention these settings."*
+而且明确写着：「这些是倾向，不是戏服 —— 永远不要描述自己的性格，也不要提这些设定。」
 
 ---
 
-## Configuration
+## 配置
 
-| Key | Default | Meaning |
+| 键 | 默认 | 含义 |
 |---|---|---|
-| `name` | `小雨` | initial name (once changed in panel, panel wins) |
-| `statePath` | `$DSH_HOME/companion/state.json` | where state lives |
-| `maxChars` | `800` | cap on the injected section |
-| `order` | `10` | section sort order |
-| `audit` | `true` | append to `ledger.jsonl` |
+| `name` | `小雨` | 初始名字（面板改过之后以面板为准） |
+| `statePath` | `$DSH_HOME/companion/state.json` | 状态文件位置 |
+| `maxChars` | `800` | 注入段长度上限 |
+| `order` | `10` | section 排序 |
+| `audit` | `true` | 是否写入 `ledger.jsonl` |
 
-State resolution for `statePath` when unset:
-`$DSH_HOME` → `$XDG_DATA_HOME` → `~/.local/share`.
+`statePath` 未设置时的解析顺序：
+`$DSH_HOME` → `$XDG_DATA_HOME` → `~/.local/share`。
 
-## Calibration reference
+## 标定参考
 
-If the pacing feels wrong, these are the dials:
+如果觉得节奏不合适，这些是可调的旋钮：
 
 ```js
-DRIFT_RATE           0.12    // drift speed
-BOND_RATE            0.025   // bonding speed
-DRIFT_THRESHOLD      0.55    // load needed before drift starts
+DRIFT_RATE           0.12    // 漂变速度
+BOND_RATE            0.025   // 键合速度
+DRIFT_THRESHOLD      0.55    // 开始漂变所需的负荷
 MUTATE_SHOCK         0.50    // ┐
-MUTATE_LOAD          0.80    // ├ all three required
+MUTATE_LOAD          0.80    // ├ 三者必须同时满足
 MUTATE_SENSITIVITY   0.68    // ┘
-MUTATE_COOLDOWN      200     // turns of quiet after a mutation
+MUTATE_COOLDOWN      200     // 突变后的冷静期（轮）
 ```
 
-Run `node src/selftest.js` after changing them — it asserts the cusp behaviour still holds
-(one blow must not mutate; two must).
+改完请跑 `node src/selftest.js` —— 它会断言尖点行为仍然成立
+（一次打击不能突变；两次必须突变）。
 
 ---
 
-## Files
+## 文件
 
-| File | Role |
+| 文件 | 作用 |
 |---|---|
-| `index.js` | plugin entry: events, persistence, section registration, RPC |
-| `client.js` | settings panel (UMD bundle for DSH's module loader) |
-| `src/persona-core.js` | pure dynamics — no IO, fully testable |
-| `src/signals.js` | rule-based signal extraction + event classification |
-| `src/ledger.js` | append-only persona timeline |
-| `src/selftest.js` | behavioural assertions — `node src/selftest.js` |
+| `index.js` | 插件入口：事件、持久化、section 注册、RPC |
+| `client.js` | 设置面板（给 DSH 的 module loader 用的 UMD bundle） |
+| `src/persona-core.js` | 纯动力学 —— 无 IO，完全可测 |
+| `src/signals.js` | 规则信号抽取 + 事件分类 |
+| `src/ledger.js` | append-only 人格时间线 |
+| `src/selftest.js` | 行为断言 —— `node src/selftest.js` |
 
-## Design status
+## 设计状态
 
-Implemented: trait layer, drift/bond/mutation, expression layer, injection, panel,
-switches, exclusions, identity.
+已实现：特质层、漂变/键合/突变、表达层、注入、面板、开关、排除、身份。
 
-Not yet: relationship state layer, narrative self-model, memory-anchor recall.
+未实现：关系状态层、叙事自我模型、记忆锚点召回。
 
-## License
+## 许可
 
 MIT

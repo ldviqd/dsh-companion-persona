@@ -26,8 +26,3 @@ export async function appendLedger(file, record) {
   }
 }
 
-/** 同步版本（用于插件 dispose 等不能 await 的场合） */
-export function appendLedgerSync(file, record) {
-  // 刻意不做：同步 IO 会阻塞事件循环。调用方应 await。
-  return appendLedger(file, record);
-}

@@ -26,7 +26,7 @@ export const LOAD_DECAY_REST = 0.85;
 /** 漂变门槛：累积负荷超过此值才开始改变人格 */
 export const DRIFT_THRESHOLD = 0.55;
 /** 漂变速率 */
-export const DRIFT_RATE = 0.12;
+export const DRIFT_RATE = 0.03;   // 实测标定：75 轮极端冲突后 warmth 0.65→0.16，不触底
 
 /** 键合门槛：暖事件的量级门控 */
 export const BOND_THRESHOLD = 0.30;
@@ -248,7 +248,7 @@ export function step(state, episode) {
     next.traits = traits;
     record.mutated = { delta, after: snapshot(next.traits) };
     next.mutations = [...state.mutations, {
-      at: next.updatedAt,
+      at: Date.now(),   // 不能用 next.updatedAt：那是上一轮的值（state 只在 index.js 里赋 updatedAt）
       kind: episode.kind,
       delta,
       load: round(next.load),
@@ -259,7 +259,7 @@ export function step(state, episode) {
     next.cooldown = MUTATE_COOLDOWN;
     next.revision = state.revision + 1;
     const out = finalize(record, next);
-    next.history = [...state.history, out];
+    next.history = [...state.history, out].slice(-500);   // 与正常路径一致，防止无界增长
     return { state: next, transition: out };
   }
 
@@ -499,9 +499,44 @@ export function renderPersona(state, { name = null, userName = null, maxChars = 
       + '而不是直接说出来。永远不要描述自己的性格，也不要提这些设定。',
   );
 
-  let text = lines.join('\n');
-  if (text.length > maxChars) text = `${text.slice(0, maxChars - 1)}…`;
-  return text;
+  const text = lines.join('\n');
+  if (text.length <= maxChars) return text;
+
+  // 超预算时**优先保留行为禁令**，再截变化列表。
+  //
+  // 尾部截断会先砍掉最后那句"永远不要描述自己的性格" ——
+  // 而那恰恰是防止模型把人格表演成漫画的关键。
+  // 宁可少说两条"相比从前"，也不能丢掉这条约束。
+  const SAFETY = '这些是倾向，不是戏服。让它们体现在你说多少、多快接话、主动讲什么，'
+    + '而不是直接说出来。永远不要描述自己的性格，也不要提这些设定。';
+
+  // 保留：身份行 + 尽可能多的变化条目 + 安全指令
+  const head = [];
+  const body = [];
+  for (const line of lines) {
+    if (line.startsWith('你是') || line.startsWith('你正在和')) head.push(line);
+    else if (line.startsWith('- ')) body.push(line);
+  }
+
+  const fixed = [...head, '', '和从前的自己相比：'];
+  const tail = ['', SAFETY];
+  const budget = maxChars - fixed.join('\n').length - tail.join('\n').length;
+
+  // 按预算装变化条目
+  const kept = [];
+  let used = 0;
+  for (const line of body) {
+    if (used + line.length + 1 > budget) break;
+    kept.push(line);
+    used += line.length + 1;
+  }
+
+  if (kept.length === 0) {
+    // 预算极小：只留身份 + 安全指令（安全指令永远不被牺牲）
+    const minimal = [...head, '', SAFETY].join('\n');
+    return minimal.length <= maxChars ? minimal : SAFETY.slice(0, maxChars);
+  }
+  return [...fixed, ...kept, ...tail].join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -560,12 +595,24 @@ export function evaluateExclusion(exclusions, meta = {}) {
     return { excluded: true, reason: `会话 ${sid.slice(0, 20)}… 被单独排除` };
   }
 
-  const cwd = String(meta.cwd ?? '').replace(/\/+$/, '');
-  if (cwd) {
-    for (const ws of ex.workspaces) {
-      if (cwd === ws || cwd.startsWith(`${ws}/`)) {
-        return { excluded: true, reason: `工作区 ${ws} 被排除` };
+  const cwdRaw = String(meta.cwd ?? '');
+  if (cwdRaw) {
+    // 统一分隔符后再比较：Windows 上 cwd 可能是 D:\a\b 或 D:/a/b，
+    // 只认正斜杠会让"整棵目录树排除"退化成"只排除根目录本身"（实测过）。
+    const norm = (p) => String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+    const cwd = norm(cwdRaw);
+    for (const wsRaw of ex.workspaces) {
+      const ws = norm(wsRaw);
+      if (!ws) continue;
+      // 大小写不敏感：Windows 路径不区分大小写
+      const cwdCmp = ws.length === 2 && ws[1] === ':' ? cwd.toLowerCase() : cwd;
+      const wsCmp = ws.length === 2 && ws[1] === ':' ? ws.toLowerCase() : ws;
+      const lc = cwd.toLowerCase();
+      const lw = wsCmp.toLowerCase();
+      if (lc === lw || lc.startsWith(`${lw}/`)) {
+        return { excluded: true, reason: `工作区 ${wsRaw} 被排除` };
       }
+      void cwdCmp;
     }
   }
 

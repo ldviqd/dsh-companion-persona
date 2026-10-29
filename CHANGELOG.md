@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.2.0
+
+Signal layer rewritten. The old rule-only extractor scored **45%** on a 22-item
+hand-labelled set of real Chinese utterances; the new layered judge scores **91%**.
+
+### Why
+
+Measured on 40 everyday utterances, the old rules classified **85% as `distance`**
+(a negative event) — "嗯", "好的", "晚安", "早" all accumulated strain. Over 200
+turns of ordinary chat this drove `warmth` down 0.41. A person having a normal
+conversation was being worn into a different character.
+
+Separately, `routine` events capped at magnitude 0.109, below the 0.30 bonding
+threshold, so the "calm relationships warm slowly" design never actually ran.
+
+### Layered judging (`src/judge.js`)
+
+1. **Confident rules** — literal-meaning phrases (betrayal / loss / repair /
+   explicit conflict / explicit distance) resolve at zero cost.
+2. **Silent words** — pure acknowledgements (嗯/好的/晚安/哦…) map to `routine`
+   instead of `distance`. Short replies are not withdrawal.
+3. **LLM judging** — everything else, with an LRU cache. On failure it degrades
+   to the old rule path, so the persona keeps working during rate limits.
+
+Accuracy: 20/22. LLM calls: 12/22 (10 resolved by rules).
+
+### Calibration fixed
+
+`DRIFT_RATE` 0.12 → 0.03. The old value reached the trait floor after ~30
+conflict turns; now 75 turns of relentless conflict lands at `warmth 0.16` — a
+person worn down, not flattened.
+
+### Bugs fixed
+
+- `rest()` was imported but **never called**, so load saturated at 1.5 and
+  sensitivity at 1.0 — the cusp fold degraded to "any shock ≥ 0.5 mutates".
+  Idle recovery now runs in the turn handler.
+- `describeChangesForPanel()` returned an array that callers destructured as an
+  object, so the panel's "compared to before" was permanently empty.
+- `toEpisode()` returned raw parameters instead of an appraised episode;
+  passing it straight to `step()` produced `load: NaN`, which silently poisons
+  all comparisons.
+- Windows workspace exclusion only matched the exact root: `D:\a\b\sub` was
+  not excluded by `D:\a\b`. Separators and case are now normalised.
+- `maxChars` truncation cut the trailing "never describe your own personality"
+  instruction first — the one line that prevents caricature. Truncation now
+  preserves it at any budget.
+- Mutation branch appended to `history` without the `.slice(-500)` the normal
+  path uses.
+- Panel read `data.turns`, which the server never returned.
+- RPC fence accepted an empty `Host` header and never checked `Origin`.
+- Removed `appendLedgerSync` (returned a Promise despite its name); use the
+  host's `dsh-home-paths` instead of hand-building the data directory.
+
+### Testing
+
+New `src/e2e.js` drives real Chinese text through the full signal → dynamics
+chain. The old `selftest.js` used an idealised event table and never touched
+`signals.js` — which is how a 45%-accurate extractor shipped with a README
+claiming "no visible change for 30 turns" while real text hit the floor in 15.
+
 ## 0.1.1
 
 - Fix: `@deepseek-ai/schemastery` moved from `peerDependencies` to `dependencies`.

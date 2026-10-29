@@ -3,6 +3,8 @@
  *
  * 格式必须与 DSH 的 ModuleLoader 契约一致：`window.__ModuleLoader__.load({id, factory})`，
  * 内部用 `require(name)` 取得宿主共享模块（react / react/jsx-runtime / slots）。
+ * 共享模块来自 platform 的静态 seed 表；package.json 里的 `dsh.client.inject`
+ * 管的是 **bundle 加载顺序**（依赖哪些客户端插件先就绪），不是模块来源。
  * 不能写成 ESM——浏览器加载的是这个 UMD 包装后的 factory。
  *
  * 数据通道：host 侧的 `persona/rpc/<method>` 前缀路由。
@@ -499,7 +501,7 @@ window.__ModuleLoader__.load({
       ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section',
         id: 'companion-persona',
-        order: 25,          // 落在 20(models) 与 30 之间，靠近记忆面板
+        order: 25,          // models 是 order:10，这里排在它之后、贴近记忆面板
         label: '人格',
         inject: () => ({}),
       }, PersonaPanel));

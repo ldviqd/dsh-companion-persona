@@ -13,6 +13,7 @@
 import Schema from '@deepseek-ai/schemastery';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { defaultDshHome } from '@deepseek-ai/dsh-home-paths';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 
 import {
@@ -28,10 +29,11 @@ import {
   TRAIT_AXES,
 } from './src/persona-core.js';
 import { extractSignals, inferEventKind, calibrateValence } from './src/signals.js';
+import { createJudge, toEpisode, CLASSIFIER_PROMPT } from './src/judge.js';
 import { appendLedger } from './src/ledger.js';
 
 export const name = 'companion-persona';
-export const inject = ['systemPrompt', 'agents', 'webServer', 'workspaceRegistry', 'sessions'];
+export const inject = ['systemPrompt', 'agents', 'webServer', 'workspaceRegistry', 'sessions', 'llm'];
 
 export const Config = Schema.object({
   /** 人格名字。空则不渲染"你是X"。 */
@@ -46,6 +48,10 @@ export const Config = Schema.object({
   audit: Schema.boolean().default(true),
   /** 干跑：只计算不注入，用于观察。 */
   dryRun: Schema.boolean().default(false),
+  /** 事件判定用的 provider（留空则跟随宿主默认）。 */
+  judgeProvider: Schema.string().default(''),
+  /** 事件判定用的 model。 */
+  judgeModel: Schema.string().default(''),
 });
 
 const STATE_DIR_NAME = 'companion';
@@ -53,11 +59,18 @@ const STATE_DIR_NAME = 'companion';
 /** 决定状态文件位置：显式配置 > $DSH_HOME/companion/state.json */
 function resolveStatePath(config, ctx) {
   if (config.statePath) return config.statePath;
-  // 取用户级数据目录，任何机器上都成立：
-  //   DSH_HOME（部署显式指定）> XDG_DATA_HOME > ~/.local/share
-  const home = process.env.DSH_HOME
-    ?? process.env.XDG_DATA_HOME
-    ?? join(homedir(), '.local', 'share');
+
+  // 用宿主自己的 home 解析（@deepseek-ai/dsh-home-paths）。
+  // 自己拼路径会在 Windows 上落到错误的位置，也会和 DSH 其它数据脱节。
+  // 该包是纯函数集合，不是注入服务 —— 直接 import 即可。
+  try {
+    const h = defaultDshHome();
+    if (typeof h === 'string' && h.length > 0) {
+      return join(h, STATE_DIR_NAME, 'state.json');
+    }
+  } catch { /* 包不可用 → 退回环境变量 */ }
+
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh');
   return join(home, STATE_DIR_NAME, 'state.json');
 }
 
@@ -116,6 +129,34 @@ export async function apply(ctx, config) {
   }
   let persistChain = Promise.resolve();
 
+  /**
+   * 事件判定器。
+   *
+   * 走宿主 llm 服务而不是自建 HTTP 客户端：provider/模型/回退链全部由 DSH 管理，
+   * 限流时宿主会自己降级，插件不需要重复实现那套。
+   */
+  const judge = createJudge({
+    classify: async (text) => {
+      // ctx.llm.stream() 是宿主唯一的一等调用入口（带 provider 路由与回退）。
+      // GenerateOptions 必须显式给 provider/model —— 这里用插件自己配置的通道，
+      // 与主对话模型解耦：即使前台换了模型，判定通道也保持稳定。
+      const chunks = ctx.llm.stream({
+        provider: config.judgeProvider,
+        model: config.judgeModel,
+        system: CLASSIFIER_PROMPT,
+        messages: [{ role: 'user', content: [{ type: 'text', text }] }],
+        maxTokens: 16,
+        temperature: 0,
+      });
+      let out = '';
+      for await (const chunk of chunks) {
+        if (chunk?.type === 'text-delta') out += chunk.text;
+      }
+      return out;
+    },
+    logger,
+  });
+
   const persist = () => {
     // 串行化写入，避免并发覆盖
     persistChain = persistChain
@@ -146,7 +187,11 @@ export async function apply(ctx, config) {
           }
         },
       });
-      agentCtx.effect(() => disposer, 'companion-persona.section()');
+      // section() 已返回 effect disposer，直接交给 agent 作用域即可，
+      // 再包一层 effect 只是多一层无意义的嵌套。
+      if (typeof disposer === 'function') {
+        agentCtx.effect(() => disposer, 'companion-persona.section()');
+      }
     } catch (err) {
       logger?.warn?.(`人格段注册失败: ${String(err)}`);
     }
@@ -189,18 +234,18 @@ export async function apply(ctx, config) {
     // 排除判定：某些会话不参与人格形成（工作区 / 单会话 / preset / subagent）
     let header = {};
     try { header = session.header ?? {}; } catch { header = {}; }
-    const verdict = evaluateExclusion(state.exclusions, {
+    const exclusionVerdict = evaluateExclusion(state.exclusions, {
       sessionId: session.id ?? header.id,
       cwd: header.cwd,
       agentPreset: header.agentPreset,
       origin: header.origin,
     });
-    if (verdict.excluded) {
+    if (exclusionVerdict.excluded) {
       if (config.audit) {
         appendLedger(join(statePath, '..', 'ledger.jsonl'), {
           at: Date.now(), kind: 'excluded', signals: {}, before: {}, after: {},
           transition: {},
-          evidence: `${verdict.reason}｜${text.slice(0, 100)}`,
+          evidence: `${exclusionVerdict.reason}｜${text.slice(0, 100)}`,
         }).catch?.(() => {});
       }
       return;
@@ -218,26 +263,31 @@ export async function apply(ctx, config) {
       return;
     }
 
-    const signals = extractSignals(text, state);
-    const kind = inferEventKind(signals, text);
-    if (!kind) return;
+    // 判定是异步的（可能调模型）。turn/end 监听器不 await，
+    // 所以人格变化在下一轮生效 —— 这符合直觉，也不阻塞对话。
+    void (async () => {
+      const verdict = await judge.judge(text);
+      const kind = verdict.kind;
+      if (!kind) return;
 
-    // 按事件类型校正效价：冲突/背叛/丧失天然负性，不依赖显式情绪词。
-    // 不加这一步，纯冲突对话的 strain 恒为 0，人格永不变化（实测过）。
-    const valenced = calibrateValence(kind, signals);
+      // 闲置恢复：距离上次更新越久，load/sensitivity 衰减越多。
+      //
+      // 旧代码导入了 rest() 却从未调用 —— 后果是 load 单调饱和到 1.5、
+      // sensitivity 饱和到 1.0，突变三条件退化为"只要 shock ≥ 0.5"，
+      // 尖点模型的折叠保护完全消失（单次背叛即可突变）。
+      const idleMinutes = (Date.now() - (state.updatedAt || Date.now())) / 60000;
+      if (idleMinutes >= 30) {
+        // 每 30 分钟视为一轮闲置恢复；上限 8 轮，避免长期不联系后一次归零
+        const rounds = Math.min(8, Math.floor(idleMinutes / 30));
+        state = restPersona(state, rounds);
+      }
 
-    const episode = appraise({
-      kind,
-      relevance: signals.relevance,
-      valence: valenced,
-      novelty: signals.novelty,
-      agency: signals.agency,
-      text,
-    });
+      const episode = toEpisode(kind, text);
+      const signals = extractSignals(text);
 
-    const before = { traits: snapshot(state.traits), load: state.load, sensitivity: state.sensitivity };
-    const { state: next, transition } = stepPersona(state, episode);
-    state = { ...next, updatedAt: Date.now() };
+      const before = { traits: snapshot(state.traits), load: state.load, sensitivity: state.sensitivity };
+      const { state: next, transition } = stepPersona(state, episode);
+      state = { ...next, updatedAt: Date.now() };
 
     // 没有实际变化就不落盘（省 IO）
     const traitsMoved = JSON.stringify(before.traits) !== JSON.stringify(snapshot(state.traits));
@@ -258,10 +308,12 @@ export async function apply(ctx, config) {
         transition: { drift: transition.drift, bond: transition.bond, mutated: transition.mutated },
         // 证据：原始用户发言（截断，避免把全文灌进审计）
         evidence: text.slice(0, 200),
+        source: verdict.source,
       }).catch?.(() => {});
     }
 
     void persist();
+    })().catch((err) => logger?.warn?.(`人格更新失败: ${String(err?.message ?? err)}`));
   });
 
   // ---------------------------------------------------------------------------
@@ -272,10 +324,49 @@ export async function apply(ctx, config) {
   // 部署前缀变化时容易 404。
   // ---------------------------------------------------------------------------
   const RPC_PREFIX = '/persona/rpc';
+  /**
+   * 请求闸门。
+   *
+   * 两条必须同时成立：
+   *   1. Host 是 loopback 或本机 trusted host（防 DNS rebinding）
+   *   2. 若带 Origin，必须与 Host 同源（防 CSRF：恶意页面跨站 POST 时
+   *      浏览器会带上自己的 Origin，与目标 Host 不符）
+   *
+   * 早期版本 `host === ''` 直接放行，等于空 Host 绕过全部检查 ——
+   * 我们自己接管了鉴权，就不能留这种口子。
+   */
+  const hostsAllowed = () => {
+    const list = ['127.0.0.1', 'localhost', '[::1]', '::1'];
+    try {
+      const startup = ctx.get?.('webRuntime') ?? ctx.get?.('webStartup');
+      const extra = startup?.trustedHosts;
+      if (Array.isArray(extra)) {
+        for (const h of extra) {
+          const bare = String(h).replace(/:\d+$/, '').toLowerCase();
+          if (bare) list.push(bare);
+        }
+      }
+    } catch { /* 读不到就用默认 */ }
+    return list;
+  };
   const HOST_FENCE = (req) => {
-    // 只接受 loopback / 本机 trusted host，与其它插件同口径（防 DNS rebinding）
-    const host = String(req.headers?.host ?? '');
-    return /^(127\.|localhost|\[::1\])/i.test(host) || host === '';
+    const rawHost = String(req.headers?.host ?? '').trim();
+    if (rawHost === '') return false;   // 空 Host 一律拒绝
+    const bareHost = rawHost.replace(/:\d+$/, '').toLowerCase();
+    const allowed = hostsAllowed().map((h) => h.toLowerCase());
+    if (!allowed.includes(bareHost)) return false;
+
+    // CSRF：浏览器跨站请求会带 Origin
+    const origin = req.headers?.origin;
+    if (typeof origin === 'string' && origin !== '' && origin !== 'null') {
+      try {
+        const o = new URL(origin);
+        if (o.host.toLowerCase() !== rawHost.toLowerCase()) return false;
+      } catch {
+        return false;   // Origin 无法解析 → 拒绝
+      }
+    }
+    return true;
   };
   const sendJson = (res, status, body) => {
     if (res.headersSent) return;
@@ -293,7 +384,7 @@ export async function apply(ctx, config) {
 
   const handlers = {
     async state() {
-      const { changed } = describeChangesForPanel(state);
+      const changed = describeChangesForPanel(state);
       return {
         ok: true,
         value: {
@@ -304,6 +395,7 @@ export async function apply(ctx, config) {
           sensitivity: state.sensitivity,
           cooldown: state.cooldown,
           revision: state.revision,
+          turns: state.history.length,   // 面板展示用
           mutations: state.mutations.length,
           updatedAt: state.updatedAt,
           changed,
@@ -426,7 +518,7 @@ export async function apply(ctx, config) {
       const limit = Math.max(1, Math.min(500, Number(payload?.limit) || 20));
       const file = join(statePath, '..', 'ledger.jsonl');
       try {
-        const raw = await (await import('node:fs/promises')).readFile(file, 'utf8');
+        const raw = await readFile(file, 'utf8');
         const lines = raw.split('\n').filter((l) => l.trim().length > 0);
         const entries = lines.slice(-limit).reverse().map((l) => {
           try { return JSON.parse(l); } catch { return null; }

@@ -213,12 +213,50 @@ export function createJudge({ classify, cacheSize = 512, logger } = {}) {
     }
 
     // 降级：规则兜底
+    //
+    // 注意 inferEventKind 的老毛病：它把大量短句和中性句判成 distance。
+    // 限流时如果直接用它，人格会被错误地往负面推 —— 比停摆更糟。
+    // 所以降级路径**先过一遍保守规则**，只在明确负性时才接受 distance。
     stats.fallbacks++;
-    const fallbackKind = inferEventKind(extractSignals(key), key) ?? 'routine';
+    const fallbackKind = conservativeFallback(key);
     return { kind: fallbackKind, source: 'fallback', reason: 'llm-unavailable' };
   }
 
   return { judge, stats, clearCache: () => cache.clear() };
+}
+
+/** 正向信号：降级路径用，避免把好事判成疏远 */
+const POSITIVE_HINTS = /(开心|高兴|喜欢|谢谢|感谢|真好|太好了|不错|顺利|成功|升职|通过|搞定|完成|赢了|幸福|满足|安心|放心|暖)/;
+/** 负向信号：只在明确负性时接受 distance */
+const NEGATIVE_HINTS = /(难过|累|烦|压力|焦虑|担心|害怕|失望|生气|讨厌|崩溃|委屈|难受|撑不住|失眠|孤独|寂寞)/;
+
+/**
+ * 保守降级：LLM 不可用时的规则兜底。
+ *
+ * 设计原则是**宁可判 routine，也不误判成负性**。
+ * 因为 routine 几乎不产生 strain（magnitude ≤ 0.109），
+ * 而误判 distance 会持续消耗人格——错一次没影响，错一百次就是另一个人。
+ */
+function conservativeFallback(text) {
+  const s = String(text ?? '');
+
+  // 亲密话题优先于情绪判断：家人/身体/私事即使语气平淡也是 intimacy
+  if (/(妈|爸|父母|家人|奶奶|爷爷|外婆|外公|弟|妹|哥|姐|住院|生病|手术|身体|去世)/.test(s)) {
+    return 'intimacy';
+  }
+
+  if (POSITIVE_HINTS.test(s)) return 'achievement';
+
+  // 明确的冲突指向（"你"字从句 + 负性）
+  if (/(你根本|你总是|你从来|你不懂|你又不|凭什么)/.test(s)) return 'conflict';
+
+  if (NEGATIVE_HINTS.test(s)) {
+    if (/(别管|不想说|不想聊|让我静一静)/.test(s)) return 'distance';
+    return 'conflict';
+  }
+
+  // 无明确情感信号 → routine（中性，不消耗人格）
+  return 'routine';
 }
 
 /**

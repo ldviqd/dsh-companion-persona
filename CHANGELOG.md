@@ -1,5 +1,82 @@
 # Changelog
 
+## 0.4.0
+
+Memory anchors: discrete, triggered recollection. A third time scale, alongside
+gradual drift and one-off mutation.
+
+### Why a third mechanism
+
+Drift says "over the long run it grew colder". Mutation says "after that thing it
+was never the same". Neither expresses *"I hadn't thought about it in months, but
+when you mentioned the hospital it all came back"* — a jump, not a curve.
+
+### What an anchor is
+
+```js
+{
+  summary: "我妈住院了",     // event core only, no emotional tail
+  state: "open",            // open -> resolved -> faded
+  weight: 0.42,
+  triggers: [{ w: "住院", weight: 1.0 }, { w: "妈", weight: 0.25 }, ...],
+  mentions: [...], recalledCount: 0,
+  resolutionNote: null,     // "后来你说她出院了"
+}
+```
+
+`resolutionNote` is the part fact-memory cannot hold. Prime-memory remembers *she
+was hospitalised*; it will never remember *and later you said she'd been
+discharged and you sounded relieved*.
+
+### Two design criteria, both initially wrong
+
+**What deserves to become an anchor.** First attempt used
+`magnitude >= 0.5 && |valence| >= 0.5`. Measured, it inverted the result:
+
+| text | magnitude | abs(valence) | first design | should be |
+|---|---|---|---|---|
+| 我妈住院了 | 0.34 | 0.25 | skip | **keep** |
+| 我其实很害怕 | 0.38 | 0.25 | skip | **keep** |
+| 今天好累 | 0.40 | 1.00 | keep | **skip** |
+
+`intimacy` (opening up) is a *positively* valenced event by design — +0.25 — yet
+it carries enormous weight. Judging memorability by |valence| systematically
+discards the entire category of self-disclosure. Switched to an event-kind
+whitelist (`intimacy` / `loss` / `betrayal`) plus disclosure depth. 11/11 on real
+sentences.
+
+**How a trigger should match.** First attempt fired on any keyword hit — so
+"妈妈咪呀这首歌好听" (a song title) recalled "mother in hospital". Switched to
+weighted triggers: primary words 1.0, strong 0.55, generic 0.25, threshold 0.6.
+Generic kinship words alone can never reach the threshold. 7/8, and the one miss
+("我妈最近怎么样") is intentional — a bare "妈" is too broad to be meaningful.
+
+### Injection
+
+Anchors are injected as a **separate section** from the persona (`order + 5`),
+not merged into it: the persona is a stable identity, recollection is what
+happened to surface this turn. Merging them would make "who I am" look different
+every turn.
+
+The injected text says, explicitly, *if it fits bring it up, otherwise keep it to
+yourself* — without that the model force-fits the memory into the conversation
+("you remember your mother was in hospital three months ago, right?").
+
+One-hour cooldown per anchor, max three per turn, weight decays slightly on each
+recall. Recall is one-shot: the pending text clears at the entry of every turn,
+so an excluded or frozen turn cannot leak a stale recollection into a later one.
+
+### Panel
+
+Lists anchors with state, weight, mention and recall counts. Resolve (with an
+optional note) and fade, per anchor.
+
+### Tests
+
+e2e 30 -> **40 assertions**. The anchor block drives real dialogue, including the
+two regressions above (self-disclosure must be kept; song titles must not
+trigger).
+
 ## 0.3.0
 
 Mutation was effectively dead on real text. Fixed — and made deliberately hard

@@ -29,6 +29,10 @@ import {
 } from './src/persona-core.js';
 import { extractSignals, inferEventKind, calibrateValence } from './src/signals.js';
 import { createJudge, toEpisode, CLASSIFIER_PROMPT } from './src/judge.js';
+import {
+  loadAnchors, saveAnchors, maybeCreateAnchor, selectRecall,
+  markRecalled, renderRecall,
+} from './src/anchor-store.js';
 import { appendLedger } from './src/ledger.js';
 
 export const name = 'companion-persona';
@@ -51,6 +55,8 @@ export const Config = Schema.object({
   judgeProvider: Schema.string().default(''),
   /** 事件判定用的 model。 */
   judgeModel: Schema.string().default(''),
+  /** 记忆锚点：从对话里抽取情感事件，命中关键词时注入"回想"。 */
+  anchorEnabled: Schema.boolean().default(true),
 });
 
 const STATE_DIR_NAME = 'companion';
@@ -130,12 +136,25 @@ export async function apply(ctx, config) {
     } catch { /* 独立安装场景，忽略 */ }
   }
   const statePath = resolveStatePath(config, ctx);
+  // 锚点与人格状态分开存：锚点是 append-mostly，人格是每轮改写，
+  // 混在一起会让每次人格更新都重写整个锚点库。
+  const anchorPath = join(statePath, '..', 'anchors.json');
   const logger = ctx.logger?.('companion-persona');
   let state = await loadState(statePath);
+  let anchors = config.anchorEnabled ? await loadAnchors(anchorPath) : [];
   // 首次运行：用配置里的名字作为初始值（之后可在面板改）
   if (!state.identity.name && config.name) {
     state = { ...state, identity: { ...state.identity, name: config.name } };
   }
+  /**
+   * 本轮待注入的回忆文本。
+   *
+   * 为什么用变量而不是在 section 的 text() 里实时计算：
+   * section 每次装配都会调用 text()，而"这一轮提到了什么"是**轮次级**信息。
+   * 在 turn/end 时算一次、存起来，下次装配读取 —— 语义正确，也不会重复计算。
+   */
+  let pendingRecallText = '';
+
   let persistChain = Promise.resolve();
 
   /**
@@ -257,6 +276,30 @@ export async function apply(ctx, config) {
           }
         },
       });
+      // 记忆锚点段：与人格段分开。
+      //
+      // 人格段是**稳定身份**，每次装配都是同一段话；
+      // 锚点是**此刻想起的事**，每轮都可能不同。
+      // 混在一个 section 里会让"我是谁"看起来每轮都在变。
+      if (config.anchorEnabled) {
+        const recallDisposer = agentCtx.systemPrompt.section({
+          name: 'companion-anchor-recall',
+          order: config.order + 5,   // 紧跟人格段之后
+          text: () => {
+            if (state.enabled?.inject === false) return '';
+            try {
+              // 用上一轮记录的待注入锚点（在 turn/end 时算好）
+              return pendingRecallText;
+            } catch {
+              return '';
+            }
+          },
+        });
+        if (typeof recallDisposer === 'function') {
+          agentCtx.effect(() => recallDisposer, 'companion-persona.anchor()');
+        }
+      }
+
       // section() 已返回 effect disposer，直接交给 agent 作用域即可，
       // 再包一层 effect 只是多一层无意义的嵌套。
       if (typeof disposer === 'function') {
@@ -285,6 +328,16 @@ export async function apply(ctx, config) {
   /** 轮次结束：抽取信号 → 推进人格 → 落盘。 */
   ctx.on('session/event', (session, event) => {
     if (event?.type !== 'turn/end') return;
+
+    /**
+     * 回忆是一次性的：入口就清空。
+     *
+     * 否则遇到"本轮被排除/冻结"的分支提前 return，pendingRecallText 不会被
+     * 覆盖，下一轮装配时会再次注入上一轮的回忆 —— 过期且重复。
+     * 在入口清空能保证"最多注入一次"，代价是那一轮如果被排除，回忆就丢了
+     * （可以接受：被排除的对话本来就不该产生人格影响）。
+     */
+    pendingRecallText = '';
 
     // 只处理真人对话轮次（有 user 消息的）
     let userTexts;
@@ -361,6 +414,49 @@ export async function apply(ctx, config) {
 
       const episode = toEpisode(kind, text);
       const signals = extractSignals(text);
+
+      // ---- 记忆锚点 ----
+      //
+      // 顺序很关键：先用**本轮文本**召回（此时锚点库还是注入前的状态），
+      // 再决定是否新建锚点。反过来会让本轮刚建出的锚点立刻自己触发自己。
+      if (config.anchorEnabled) {
+        try {
+          const recalled = selectRecall(anchors, text, Date.now());
+          if (recalled.length > 0) {
+            pendingRecallText = renderRecall(recalled);
+            for (const r of recalled) markRecalled(r.anchor, Date.now());
+            if (config.audit) {
+              appendLedger(join(statePath, '..', 'ledger.jsonl'), {
+                at: Date.now(), kind: 'recall', signals: {}, before: {}, after: {},
+                transition: {},
+                evidence: `想起：${recalled.map((r) => r.anchor.summary).join(' / ')}`,
+              }).catch?.(() => {});
+            }
+          } else {
+            pendingRecallText = '';
+          }
+
+          const created = maybeCreateAnchor(anchors, {
+            kind, signals, episode, text, at: Date.now(),
+          });
+          if (created) {
+            anchors = [...anchors, created];
+            if (config.audit) {
+              appendLedger(join(statePath, '..', 'ledger.jsonl'), {
+                at: Date.now(), kind: 'anchor-new', signals: {}, before: {}, after: {},
+                transition: {},
+                evidence: `新建锚点「${created.summary}」(${created.kind}, 权重 ${created.weight})`,
+              }).catch?.(() => {});
+            }
+          }
+          // 异步落盘，不阻塞人格更新
+          void saveAnchors(anchorPath, anchors).catch((err) => {
+            logger?.warn?.(`锚点保存失败: ${String(err?.message ?? err)}`);
+          });
+        } catch (err) {
+          logger?.warn?.(`锚点处理失败: ${String(err?.message ?? err)}`);
+        }
+      }
 
       const before = { traits: snapshot(state.traits), load: state.load, sensitivity: state.sensitivity };
       const { state: next, transition } = stepPersona(state, episode);
@@ -475,6 +571,22 @@ export async function apply(ctx, config) {
           // "为什么吵了这么多次还不突变"
           trustDamage: state.trustDamage ?? 0,
           negativeSinceMutation: state.negativeSinceMutation ?? 0,
+          // 记忆锚点（面板展示）
+          anchors: config.anchorEnabled
+            ? anchors.map((a) => ({
+                id: a.id,
+                summary: a.summary,
+                kind: a.kind,
+                state: a.state,
+                weight: a.weight,
+                when: a.when,
+                resolvedAt: a.resolvedAt,
+                resolutionNote: a.resolutionNote,
+                recalledCount: a.recalledCount ?? 0,
+                lastRecalledAt: a.lastRecalledAt,
+                mentionCount: (a.mentions ?? []).length,
+              }))
+            : [],
           revision: state.revision,
           turns: state.history.length,   // 面板展示用
           mutations: state.mutations.length,
@@ -594,6 +706,46 @@ export async function apply(ctx, config) {
       }
       logger?.info?.(`身份更新: name=${next.name || '(空)'} userName=${next.userName || '(空)'}`);
       return { ok: true, value: { identity: next, changed: true } };
+    },
+    /**
+     * 锚点操作：标记已解决 / 淡出 / 删除。
+     *
+     * 只做这三个动作，不开放任意字段编辑 —— 锚点是自动抽取的，
+     * 让用户手改内容会破坏 triggers 与 summary 的一致性。
+     */
+    async anchor(payload) {
+      if (!config.anchorEnabled) {
+        return { ok: false, error: { message: '锚点功能未启用' } };
+      }
+      const id = String(payload?.id ?? '');
+      const action = String(payload?.action ?? '');
+      const target = anchors.find((a) => a.id === id);
+      if (!target) return { ok: false, error: { message: `未找到锚点 ${id}` } };
+
+      let note = '';
+      if (action === 'resolve') {
+        target.state = 'resolved';
+        target.resolvedAt = Date.now();
+        target.resolutionNote = String(payload?.note ?? '').trim() || null;
+        note = `标记已解决「${target.summary}」`;
+      } else if (action === 'fade') {
+        target.state = 'faded';
+        note = `淡出「${target.summary}」`;
+      } else if (action === 'delete') {
+        anchors = anchors.filter((a) => a.id !== id);
+        note = `删除锚点「${target.summary}」`;
+      } else {
+        return { ok: false, error: { message: `未知操作 ${action}` } };
+      }
+
+      await saveAnchors(anchorPath, anchors);
+      if (config.audit) {
+        appendLedger(join(statePath, '..', 'ledger.jsonl'), {
+          at: Date.now(), kind: 'anchor-edit', signals: {}, before: {}, after: {},
+          transition: {}, evidence: note,
+        }).catch?.(() => {});
+      }
+      return { ok: true, value: { anchors, note } };
     },
     async ledger(payload) {
       const limit = Math.max(1, Math.min(500, Number(payload?.limit) || 20));

@@ -467,6 +467,68 @@ window.__ModuleLoader__.load({
       }
 
       
+      // --- 记忆锚点 ---
+      const anch = data.anchors ?? [];
+      if (anch.length > 0) {
+        const stateLabel = { open: '悬着', resolved: '已解决', faded: '已淡出' };
+        const stateColor = { open: '#d29922', resolved: '#2ea043', faded: 'rgba(127,127,127,0.6)' };
+        children.push(h('div', { key: 'anc-h', style: C.h },
+          `记忆锚点（${anch.length} 条）`));
+        children.push(h('div', { key: 'anc-sub', style: C.sub },
+          '从对话里自动抽取的情感事件。命中相关词时会被"想起"，注入给模型。'));
+
+        for (const a of anch.slice().sort((x, y) => (y.when ?? 0) - (x.when ?? 0))) {
+          const when = a.when ? new Date(a.when).toLocaleDateString() : '';
+          children.push(h('div', { key: a.id, style: { ...C.card, marginTop: 6 } }, [
+            h('div', { key: 'top', style: { display: 'flex', alignItems: 'center', gap: 6 } }, [
+              h('span', {
+                key: 's',
+                style: {
+                  fontSize: 10, padding: '1px 5px', borderRadius: 3,
+                  color: stateColor[a.state] ?? 'inherit',
+                  border: `1px solid ${stateColor[a.state] ?? 'rgba(127,127,127,0.3)'}`,
+                },
+              }, stateLabel[a.state] ?? a.state),
+              h('span', { key: 'n', style: { fontWeight: 600 } }, a.summary),
+              h('span', { key: 'w', style: { marginLeft: 'auto', opacity: 0.5, fontSize: 10 } },
+                `${when} · 权重 ${(a.weight ?? 0).toFixed(2)}`),
+            ]),
+            a.resolutionNote
+              ? h('div', { key: 'r', style: { marginTop: 4, opacity: 0.7, fontSize: 11 } },
+                  `↳ 后来：${a.resolutionNote}`)
+              : null,
+            h('div', { key: 'meta', style: { marginTop: 4, opacity: 0.55, fontSize: 10 } },
+              `提到过 ${a.mentionCount ?? 0} 次 · 被想起 ${a.recalledCount ?? 0} 次`),
+            h('div', { key: 'act', style: { marginTop: 6, display: 'flex', gap: 6 } }, [
+              a.state === 'open'
+                ? h('button', {
+                    key: 'res', style: { ...C.btn, fontSize: 11, padding: '3px 8px' },
+                    onClick: async () => {
+                      const note = window.prompt('后来怎么样了？（可留空）', '');
+                      if (note === null) return;
+                      try {
+                        await callRpc('anchor', { id: a.id, action: 'resolve', note });
+                        await load();
+                      } catch (err) { setError(err?.message ?? String(err)); }
+                    },
+                  }, '标记已解决')
+                : null,
+              a.state !== 'faded'
+                ? h('button', {
+                    key: 'fd', style: { ...C.btn, fontSize: 11, padding: '3px 8px' },
+                    onClick: async () => {
+                      try {
+                        await callRpc('anchor', { id: a.id, action: 'fade' });
+                        await load();
+                      } catch (err) { setError(err?.message ?? String(err)); }
+                    },
+                  }, '淡出')
+                : null,
+            ].filter(Boolean)),
+          ]));
+        }
+      }
+
       // 最近变更
       children.push(h('div', { key: 'lg-h', style: C.h }, '最近变更'));
       if (ledger === null) {

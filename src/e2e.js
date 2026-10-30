@@ -21,6 +21,11 @@ import {
   evaluateExclusion, TRAIT_AXES,
 } from './persona-core.js';
 import { ruleFilter, parseKind, toEpisode, createJudge, KINDS } from './judge.js';
+import { extractSignals } from './signals.js';
+import {
+  maybeCreateAnchor, selectRecall, markRecalled, renderRecall,
+} from './anchor-store.js';
+import { shouldCreateAnchor, buildTriggers, scoreTrigger } from './anchor.js';
 import { rest as restPersona } from './persona-core.js';
 
 const OFFLINE = process.argv.includes('--offline');
@@ -385,7 +390,83 @@ console.log('=== 13. 防御：不该突变的情况 ===');
 }
 
 // ---------------------------------------------------------------------------
-// 14. 安全指令不能被截断
+// 14. 记忆锚点（v0.4）
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14. 记忆锚点 ===');
+{
+  const createCases = [
+    ['我妈住院了', 'intimacy', true],
+    ['我奶奶走了', 'loss', true],
+    ['我其实很害怕', 'intimacy', true],
+    ['你骗了我', 'betrayal', true],
+    ['今天好累', 'conflict', false],
+    ['谢谢你陪我', 'support', false],
+    ['嗯', 'routine', false],
+  ];
+  let createOk = 0;
+  const createErr = [];
+  for (const [t, k, want] of createCases) {
+    const sig = extractSignals(t);
+    const got = shouldCreateAnchor(k, sig, t).should;
+    if (got === want) createOk++;
+    else createErr.push(`${t}(${got ? '建' : '不建'})`);
+  }
+  check('建锚点判据准确', createOk === createCases.length,
+    `${createOk}/${createCases.length}${createErr.length ? ' 错:' + createErr.join(',') : ''}`);
+
+  const triggers = buildTriggers('intimacy', '我妈住院了，我有点撑不住');
+  const anchor = { triggers, weight: 0.8, state: 'open' };
+  let misfireOk = 0;
+  for (const t of ['妈妈咪呀这首歌好听', '身体是革命的本钱']) {
+    if (!scoreTrigger(anchor, t).hit) misfireOk++;
+  }
+  check('泛化词不单独触发', misfireOk === 2, `${misfireOk}/2`);
+
+  let hitOk = 0;
+  for (const t of ['我妈住院了', '今天去医院了', '我妈身体不舒服']) {
+    if (scoreTrigger(anchor, t).hit) hitOk++;
+  }
+  check('同域表达能触发', hitOk === 3, `${hitOk}/3`);
+
+  const DIALOGUE = [
+    ['今天天气不错', 'routine'],
+    ['我妈住院了，我有点撑不住', 'intimacy'],
+    ['好的', 'routine'],
+    ['今天去医院了，医生说要观察', 'intimacy'],
+    ['我奶奶走了', 'loss'],
+    ['晚安', 'routine'],
+  ];
+  const anchors = [];
+  const recalls = [];
+  let now = Date.now();
+  for (const [text, kind] of DIALOGUE) {
+    const sig = extractSignals(text);
+    const ep = toEpisode(kind, text);
+    const hit = selectRecall(anchors, text, now);
+    if (hit.length) {
+      recalls.push({ text, summaries: hit.map((h) => h.anchor.summary) });
+      for (const h of hit) markRecalled(h.anchor, now);
+    }
+    const created = maybeCreateAnchor(anchors, { kind, signals: sig, episode: ep, text, at: now });
+    if (created) anchors.push(created);
+    now += 600000;
+  }
+  console.log(`    锚点: ${anchors.map((a) => a.summary).join(' / ')}`);
+  check('从真实对话建出 2 个锚点', anchors.length === 2, `${anchors.length} 个`);
+  check('日常对话不产生锚点', !anchors.some((a) => a.summary.includes('天气') || a.summary === '好的'));
+  check('提到医院能召回', recalls.some((r) => r.text.includes('医院')));
+  check('摘要只留事件核心', anchors.some((a) => a.summary === '我妈住院了'));
+
+  const injected = renderRecall([{ anchor: anchors[0] }]);
+  check('注入含"你想起的事"', injected.includes('你想起的事'));
+  check('注入明确"可以不说"', injected.includes('不合适就放在心里'));
+  check('注入不含原始全文', !injected.includes('撑不住'));
+}
+
+// ---------------------------------------------------------------------------
+// 15. 安全指令不能被截断
 // ---------------------------------------------------------------------------
 
 console.log();

@@ -469,13 +469,32 @@ window.__ModuleLoader__.load({
       
       // --- 记忆锚点 ---
       const anch = data.anchors ?? [];
-      if (anch.length > 0) {
+      const excl = data.exclusion ?? null;
+
+      // 即使没有锚点也要显示这一块 —— 空和"功能坏了"必须能区分开。
+      // 之前的写法是 `if (anch.length > 0)` 才渲染，结果被排除规则拦下时
+      // 整块消失，用户只会以为功能没生效。
+      {
         const stateLabel = { open: '悬着', resolved: '已解决', faded: '已淡出' };
         const stateColor = { open: '#d29922', resolved: '#2ea043', faded: 'rgba(127,127,127,0.6)' };
         children.push(h('div', { key: 'anc-h', style: C.h },
           `记忆锚点（${anch.length} 条）`));
         children.push(h('div', { key: 'anc-sub', style: C.sub },
           '从对话里自动抽取的情感事件。命中相关词时会被"想起"，注入给模型。'));
+
+        // 空态：先解释原因，再给结论
+        if (anch.length === 0) {
+          let why;
+          if (excl?.excluded) {
+            why = `当前会话被排除（${excl.reason}），所以不会产生锚点。`;
+          } else if (!data.anchorEnabled) {
+            why = '锚点功能已关闭。';
+          } else {
+            why = '还没有值得记住的事。示弱、丧失、背叛这类事件才会形成锚点 ——'
+              + '日常寒暄和轻微抱怨不会。';
+          }
+          children.push(h('div', { key: 'anc-empty', style: { ...C.card, opacity: 0.7 } }, why));
+        }
 
         for (const a of anch.slice().sort((x, y) => (y.when ?? 0) - (x.when ?? 0))) {
           const when = a.when ? new Date(a.when).toLocaleDateString() : '';

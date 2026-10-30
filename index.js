@@ -155,6 +155,14 @@ export async function apply(ctx, config) {
    */
   let pendingRecallText = '';
 
+  /**
+   * 最近一次排除判定的结果。
+   *
+   * 面板需要它来解释"为什么人格没变化、为什么没有锚点"。
+   * 没有这个字段时，用户看到空面板只会以为功能坏了 —— 实际是排除规则在生效。
+   */
+  let currentExclusion = null;
+
   let persistChain = Promise.resolve();
 
   /**
@@ -369,6 +377,10 @@ export async function apply(ctx, config) {
       agentPreset: header.agentPreset,
       origin: header.origin,
     });
+    currentExclusion = exclusionVerdict.excluded
+      ? { excluded: true, reason: exclusionVerdict.reason }
+      : { excluded: false, reason: null };
+
     if (exclusionVerdict.excluded) {
       if (config.audit) {
         appendLedger(join(statePath, '..', 'ledger.jsonl'), {
@@ -572,6 +584,9 @@ export async function apply(ctx, config) {
           trustDamage: state.trustDamage ?? 0,
           negativeSinceMutation: state.negativeSinceMutation ?? 0,
           // 记忆锚点（面板展示）
+          // 当前上下文的排除状态：面板要能解释"为什么没有锚点/没有变化"
+          exclusion: currentExclusion,
+          anchorEnabled: config.anchorEnabled,
           anchors: config.anchorEnabled
             ? anchors.map((a) => ({
                 id: a.id,

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.1
+
+The anchor panel silently disappeared when there were no anchors, which made a
+working feature look broken.
+
+Root cause of the empty list in practice: the panel only rendered the block when
+`anchors.length > 0`, and the current session's workspace is in the user's own
+exclusion list -- so every turn short-circuited at the exclusion branch, no anchor
+was ever created, and the block never appeared. It looked like the feature had
+never shipped.
+
+- The anchor block now always renders. When empty it states *why*: the session is
+  excluded (with the reason), the feature is disabled, or simply nothing
+  anchor-worthy has happened yet.
+- `state` now returns `exclusion` (the last verdict and its reason) and
+  `anchorEnabled`, so the panel can distinguish "excluded" from "not yet".
+
+Verified separately that anchor creation, recall and persistence all work outside
+an excluded workspace: two anchors built from real dialogue, recall fired on the
+hospital mention, and the JSON round-tripped intact.
+
 ## 0.4.0
 
 Memory anchors: discrete, triggered recollection. A third time scale, alongside

@@ -1,5 +1,97 @@
 # Changelog
 
+## 0.3.0
+
+Mutation was effectively dead on real text. Fixed — and made deliberately hard
+to trigger by accident.
+
+### The bug (reported by an external audit, confirmed)
+
+`novelty` was computed in `signals.js` from the **pre-calibration** valence, but
+`calibrateValence()` runs later in `toEpisode()`. A plain betrayal carries no
+sentiment words, so its raw valence is 0, so `novelty` collapsed to the short-
+sentence floor of 0.15:
+
+```
+shock = |−0.85| × 0.382 × 0.15 = 0.0487     // threshold is 0.50
+```
+
+Measured: five consecutive betrayals pushed `load` to 1.38 while `shock` stayed
+at 0.0487. **500 rounds of continuous harm produced zero mutations.** The single
+most distinctive feature of the design never fired.
+
+The bundled `selftest.js` could not see this because it drove `step()` with
+hand-built episodes that hard-code `novelty: 0.35`, never touching the signal
+layer — the same mistake the CHANGELOG already recorded for v0.1.x.
+
+### Why not just lower the threshold
+
+The obvious fix — decouple `novelty` from `shock` and drop the threshold — makes
+"you lied to me" score 0.32, so **two sentences flip the persona**. A bad
+afternoon would rewrite months of accumulated character.
+
+Instead the gate gained two dimensions:
+
+**`trustDamage` — accumulated relationship damage**
+
+| | `load` | `trustDamage` |
+|---|---|---|
+| means | rough patch | this person hurt me |
+| decays | ×0.92 / turn | ×0.995 / turn (~140-turn half-life) |
+| heals | one good night | needs sustained repair (repair rate is half the damage rate) |
+
+**`MUTATE_MIN_EVENTS = 3` — independent negative events required**
+
+This is the hard guarantee against "a few careless words": with `load`,
+`sensitivity` and `trustDamage` all pinned at maximum, a single event still
+cannot mutate. Verified by test.
+
+### Also fixed: relevance was semantically wrong
+
+`relevance` was derived from length, intimate-topic words and self-disclosure
+only — so the four-character "你骗了我" scored 0.40, i.e. *this doesn't concern
+us much*. Being betrayed by someone close is about as relevant as it gets.
+
+Added `HIGH_RELEVANCE_KINDS` (betrayal / loss 0.85, intimacy 0.65, repair 0.60,
+conflict 0.55). Short-sentence betrayal magnitude rises 0.41 → 0.61, shock 0.16 → 0.233.
+
+### Recalibrated `MUTATE_SHOCK` 0.50 → 0.20
+
+Real short sentences land at 0.16–0.23. Swept the threshold against real text:
+
+| threshold | severe harm | mild complaints |
+|---|---|---|
+| 0.50 | never | never |
+| **0.20** | **turn 6** | **never** |
+| 0.15 | turn 7 | turn 13 ← dangerous |
+| 0.08 | turn 7 | turn 13 |
+
+0.20 is the only value where harm is reachable and complaints are not.
+
+### Measured behaviour (real text driving the full chain)
+
+| scenario | mutations | warmth Δ | guardedness Δ |
+|---|---|---|---|
+| 300 turns of small talk | 0 | 0.000 | 0.000 |
+| 300 turns of mild complaints | 0 | −0.600 | +0.636 |
+| 50 turns of severe harm | 1 (turn 6) | −0.451 | +0.278 |
+| 300 turns of warm relationship | 0 | +0.254 | −0.100 |
+
+300 turns of "I'm tired / a bit annoyed" wears the persona down but never flips
+it. Six consecutive betrayals does.
+
+### Panel
+
+Shows mutation progress (`trustDamage` and negative-event count against their
+thresholds) so it is visible *why* a persona has not mutated yet.
+
+### Tests
+
+`e2e.js` 23 → **30 assertions**, now including real-text mutation reachability
+and defensive checks (mild complaints must not mutate; small talk must not move
+traits at all). `selftest.js` assertions updated — "two blows must mutate" is
+superseded by "no single event can mutate".
+
 ## 0.2.2
 
 Addresses the v0.2.0 audit. Three functional defects, all verified by test.

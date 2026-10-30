@@ -54,7 +54,37 @@ export const BOND_RATE = 0.025;
 /** 突变三条件 */
 export const MUTATE_LOAD = 0.80;
 export const MUTATE_SENSITIVITY = 0.68;
-export const MUTATE_SHOCK = 0.50;
+export const MUTATE_SHOCK = 0.20;   // 实测标定：真实短句 shock 约 0.16-0.21，0.50 会让突变永远不可达
+
+/**
+ * 关系损伤门槛。
+ *
+ * 为什么需要第四个条件：前三条件里 `load` 与 `sensitivity` 都太容易堆 ——
+ * 连续 3 轮冲突 load 就到 0.9，于是"唯一门槛"实际只剩 shock。
+ * 结果是"吵几次架就翻脸"，而一次重击反而因为 shock 不够而不 mutate。
+ *
+ * trustDamage 与 load 的语义差别：
+ *   load       = 这阵子压力大（衰减快，睡一觉就好）
+ *   trustDamage = 这个人伤过我（衰减很慢，要长期修复）
+ *
+ * 突变应该由后者决定，不该由前者决定。
+ */
+export const MUTATE_TRUST = 0.60;
+
+/** trustDamage 每轮衰减系数。约 140 轮半衰（假想每轮几分钟对话）。 */
+export const TRUST_DECAY = 0.995;
+/** 负性事件对关系的损伤系数。刻意小于 1：伤一次不至于毁掉关系。 */
+export const TRUST_DAMAGE_RATE = 0.30;
+/** 暖事件对关系的修复系数。修复比损伤慢 —— 这是真实关系的形状。 */
+export const TRUST_REPAIR_RATE = 0.15;
+
+/**
+ * 触发突变所需的**独立负性事件次数**下限。
+ *
+ * 直接回答"几句无心之言会不会毁掉人格"：不会。
+ * 无论单次伤害多重，一次都不够。真实的性格改变来自"那件事之后，又有很多事"。
+ */
+export const MUTATE_MIN_EVENTS = 3;
 /** 突变后强制冷静期（轮） */
 export const MUTATE_COOLDOWN = 200;
 
@@ -158,6 +188,10 @@ export function initialState(overrides = {}) {
     load: 0,
     sensitivity: 0,
     cooldown: 0,
+    /** 关系损伤累积（衰减远慢于 load），见 TRUST_DECAY */
+    trustDamage: 0,
+    /** 自上次突变以来经历的独立负性事件数 */
+    negativeSinceMutation: 0,
     /**
      * 人格模块开关。
      *
@@ -244,6 +278,18 @@ export function step(state, episode) {
   const growth = episode.magnitude * Math.max(0, episode.valence);
   next.load = clamp(next.load * LOAD_DECAY + strain - 0.5 * growth, 0, 1.5);
 
+  // 1b) 关系损伤：衰减极慢，只有长期伤害才堆得起来
+  {
+    const damage = episode.magnitude * Math.max(0, -episode.valence);
+    const repair = episode.magnitude * Math.max(0, episode.valence);
+    next.trustDamage = clamp(
+      next.trustDamage * TRUST_DECAY
+        + damage * TRUST_DAMAGE_RATE
+        - repair * TRUST_REPAIR_RATE,
+      0, 1.5,
+    );
+  }
+
   // 2) 易感性：随波动上升，且被高负荷喂养 —— 这个耦合才产生尖点折叠
   const shock = Math.abs(episode.valence) * episode.magnitude * episode.novelty;
   next.sensitivity = clamp(
@@ -256,11 +302,25 @@ export function step(state, episode) {
   if (next.cooldown > 0) next.cooldown -= 1;
 
   // 3) 突变：三条件同时满足
+  // 负性事件计数：只有"真的伤人"的事件才算，普通 routine 不计数
+  if (episode.valence < -0.2 && episode.magnitude >= 0.15) {
+    next.negativeSinceMutation = (next.negativeSinceMutation ?? 0) + 1;
+  }
+
+  // 3) 突变：五条件同时满足
+  //
+  // 相比 v0.2.2 多了两条：
+  //   trustDamage          —— 关系已被实质损伤（不是"这阵子压力大"）
+  //   negativeSinceMutation —— 至少经历 N 次独立负性事件（单次重击不够）
+  //
+  // 这两条是为了防止"几句气话毁掉几个月的人格"，同时不牺牲"磨到某个点才变"。
   if (
     next.cooldown === 0
     && shock >= MUTATE_SHOCK
     && next.load >= MUTATE_LOAD
     && next.sensitivity >= MUTATE_SENSITIVITY
+    && next.trustDamage >= MUTATE_TRUST
+    && next.negativeSinceMutation >= MUTATE_MIN_EVENTS
   ) {
     const { traits, delta } = mutate(next.traits, next.resistance, episode);
     next.traits = traits;
@@ -274,6 +334,9 @@ export function step(state, episode) {
     }];
     next.load = 0;
     next.sensitivity = 0;
+    // trustDamage 不归零：伤过就是伤过，只是不再继续推动突变
+    next.trustDamage = Math.max(0, next.trustDamage - MUTATE_TRUST);
+    next.negativeSinceMutation = 0;
     next.cooldown = MUTATE_COOLDOWN;
     next.revision = state.revision + 1;
     const out = finalize(record, next);
@@ -378,12 +441,15 @@ export function rest(state, rounds = 1) {
   let load = state.load;
   let sensitivity = state.sensitivity;
   let cooldown = state.cooldown;
+  let trustDamage = state.trustDamage ?? 0;
   for (let i = 0; i < rounds; i++) {
     load *= LOAD_DECAY_REST;
     sensitivity *= LOAD_DECAY_REST;
+    // 闲置也修复关系，但比 load 慢得多 —— 这正是"伤过"和"累了"的区别
+    trustDamage *= 0.97;
     if (cooldown > 0) cooldown -= 1;
   }
-  return { ...state, load, sensitivity, cooldown };
+  return { ...state, load, sensitivity, cooldown, trustDamage };
 }
 
 // ---------------------------------------------------------------------------
@@ -582,6 +648,8 @@ function finalize(record, state) {
     loadAfter: round(state.load),
     sensitivityAfter: round(state.sensitivity),
     traits: snapshot(state.traits),
+    trustDamage: round(state.trustDamage ?? 0),
+    negativeEvents: state.negativeSinceMutation ?? 0,
     revision: state.revision,
   };
 }

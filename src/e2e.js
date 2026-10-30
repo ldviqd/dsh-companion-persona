@@ -321,7 +321,71 @@ console.log('=== 10. 排除规则 ===');
 }
 
 // ---------------------------------------------------------------------------
-// 11. 安全指令不能被截断
+// 12. 突变在真实文本上可达（v0.3 新增）
+//
+//     审计报告的核心发现：novelty 用了校正前的 valence，导致
+//     "你骗了我" shock = 0.049，差门槛 10 倍，连续 500 轮伤害也不突变。
+//     突变——这个插件最有设计感的功能——在真实文本上实际是死的。
+//
+//     这里用**真实短句**驱动，不构造事件。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 12. 突变可达性（真实文本）===');
+{
+  const harsh = ['你骗了我', '你一直在瞒着我', '我受够了'];
+  const ep = toEpisode('betrayal', harsh[0]);
+  const shock = Math.abs(ep.valence) * ep.magnitude * ep.novelty;
+  console.log(`    "你骗了我": rel=${ep.relevance.toFixed(2)} mag=${ep.magnitude.toFixed(3)} nov=${ep.novelty} shock=${shock.toFixed(3)}`);
+  check('短句背叛的 shock 达到门槛', shock >= 0.20, `shock=${shock.toFixed(3)}`);
+
+  // 连续严重伤害 → 必然突变
+  let s = initialState();
+  let firstMut = null;
+  for (let i = 0; i < 50; i++) {
+    s = step(s, toEpisode('betrayal', harsh[i % harsh.length])).state;
+    if (!firstMut && s.mutations.length > 0) firstMut = i + 1;
+  }
+  console.log(`    连续严重伤害 50 轮: 首次突变 ${firstMut ? `第 ${firstMut} 轮` : '❌ 从未'}`);
+  check('真实伤害能触发突变', firstMut !== null, firstMut ? `第 ${firstMut} 轮` : '');
+  check('突变不会太早（≥ 3 轮）', firstMut !== null && firstMut >= 3, `第 ${firstMut} 轮`);
+}
+
+// ---------------------------------------------------------------------------
+// 13. 防御：轻微抱怨与日常不应触发突变（v0.3 新增）
+//
+//     这是"几句无心之言会不会毁掉人格"的量化回答。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 13. 防御：不该突变的情况 ===');
+{
+  // 轻微抱怨 300 轮 —— 会慢慢变冷，但绝不该突变
+  const mild = ['今天好累', '有点烦', '算了', '随便吧'];
+  let s = initialState();
+  for (let i = 0; i < 300; i++) {
+    s = step(s, toEpisode('conflict', mild[i % mild.length])).state;
+    if (i % 10 === 9) s = restPersona(s, 2);
+  }
+  console.log(`    轻微抱怨 300 轮: 突变 ${s.mutations.length} 次, warmth=${s.traits.warmth.toFixed(3)}`);
+  check('轻微抱怨不触发突变', s.mutations.length === 0, `${s.mutations.length} 次`);
+  check('但确实变冷了（漂变仍在工作）', s.traits.warmth < 0.65, s.traits.warmth.toFixed(3));
+
+  // 日常闲聊 300 轮
+  const daily = ['嗯', '好的', '晚安', '今天天气不错', '哈哈哈'];
+  let d = initialState();
+  for (let i = 0; i < 300; i++) {
+    const r = ruleFilter(daily[i % daily.length]);
+    d = step(d, toEpisode(r.kind ?? 'routine', daily[i % daily.length])).state;
+    if (i % 10 === 9) d = restPersona(d, 2);
+  }
+  check('日常闲聊不触发突变', d.mutations.length === 0, `${d.mutations.length} 次`);
+  check('日常闲聊不改变人格', Math.abs(d.traits.warmth - d.baseline.warmth) < 0.02,
+    (d.traits.warmth - d.baseline.warmth).toFixed(3));
+}
+
+// ---------------------------------------------------------------------------
+// 14. 安全指令不能被截断
 // ---------------------------------------------------------------------------
 
 console.log();

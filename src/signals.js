@@ -74,6 +74,35 @@ function countHits(text, words) {
  *            selfDisclosure:number, conflict:number, repair:number,
  *            engagement:number, topicIntimacy:number, confidence:number}}
  */
+/**
+ * 高相关事件类型：这些事**天然**与"我和这个人之间"强相关，不需要靠字数或
+ * 情感词来证明。
+ *
+ * 修的是一个语义错误：原 relevance 只用 长度/亲密词/自我暴露 来算，
+ * 于是 4 个字的"你骗了我"拿到 relevance=0.40 —— 算法认为"这事跟你关系不大"。
+ * 但被亲近的人背叛恰恰是最相关的事之一。
+ *
+ * 结果：magnitude 被压到 0.41，shock 只有 0.159，突变永远够不到门槛。
+ */
+export const HIGH_RELEVANCE_KINDS = {
+  betrayal: 0.85,
+  loss: 0.85,
+  conflict: 0.55,
+  repair: 0.60,
+  intimacy: 0.65,
+};
+
+/**
+ * 给信号补一个"按事件类型"的相关性下限。
+ *
+ * 在 judge 判定出 kind 之后调用，因为 signals.js 自己不知道 kind。
+ */
+export function applyKindRelevance(sig, kind) {
+  const floor = HIGH_RELEVANCE_KINDS[kind];
+  if (floor === undefined) return sig;
+  return { ...sig, relevance: Math.max(sig.relevance, floor) };
+}
+
 export function extractSignals(text) {
   const s = String(text ?? '').trim();
   if (s.length === 0) {

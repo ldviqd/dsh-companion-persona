@@ -471,6 +471,10 @@ export async function apply(ctx, config) {
           load: state.load,
           sensitivity: state.sensitivity,
           cooldown: state.cooldown,
+          // v0.3：突变新增两个条件，面板要能看到它们，否则用户不知道
+          // "为什么吵了这么多次还不突变"
+          trustDamage: state.trustDamage ?? 0,
+          negativeSinceMutation: state.negativeSinceMutation ?? 0,
           revision: state.revision,
           turns: state.history.length,   // 面板展示用
           mutations: state.mutations.length,

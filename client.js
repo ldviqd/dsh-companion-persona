@@ -320,6 +320,30 @@ window.__ModuleLoader__.load({
         `累积负荷 ${(data.load ?? 0).toFixed(3)} · 易感性 ${(data.sensitivity ?? 0).toFixed(3)}`
           + (data.cooldown > 0 ? ` · 突变冷却 ${data.cooldown} 轮` : '')));
 
+      // 突变进度（v0.3）
+      // 突变要五个条件同时满足，其中"关系损伤"和"负性事件数"最容易让人困惑
+      // ——「为什么吵了这么多次还没变？」，所以单独显示进度。
+      {
+        const trust = data.trustDamage ?? 0;
+        const events = data.negativeSinceMutation ?? 0;
+        const TRUST_NEED = 0.60;
+        const EVENTS_NEED = 3;
+        const trustOk = trust >= TRUST_NEED;
+        const eventsOk = events >= EVENTS_NEED;
+        if (trust > 0.02 || events > 0) {
+          children.push(h('div', { key: 'mut-h', style: C.h }, '突变进度'));
+          children.push(h('div', { key: 'mut-t', style: C.sub }, [
+            h('div', { key: 'tr' },
+              `关系损伤 ${trust.toFixed(2)} / ${TRUST_NEED}  ${trustOk ? '✅' : ''}`),
+            h('div', { key: 'ev' },
+              `负性事件 ${events} / ${EVENTS_NEED} 次  ${eventsOk ? '✅' : ''}`),
+            h('div', { key: 'note', style: { marginTop: 4, opacity: 0.65 } },
+              '突变还需「冲击够强 + 负荷够高 + 易感够高」同时成立；'
+                + '单次事件无论多重都不会触发。'),
+          ]));
+        }
+      }
+
       // 开关
       const en = data.enabled ?? { inject: true, evolve: true };
       children.push(h('div', { key: 'sw-h', style: C.h }, '开关'));

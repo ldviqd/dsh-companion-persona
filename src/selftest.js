@@ -8,6 +8,7 @@
 import {
   appraise, initialState, step, rest, renderPersona, describeChanges,
   MUTATE_LOAD, MUTATE_SENSITIVITY, MUTATE_SHOCK, TRAIT_AXES,
+  MUTATE_MIN_EVENTS, MUTATE_TRUST,
 } from './persona-core.js';
 
 let failures = 0;
@@ -86,25 +87,41 @@ const strained = [
   const r = runScenario(initialState(), strained, 240);
   check('明显硬化（戒备上升）', r.state.traits.guardedness > 0.35, `guardedness=${r.state.traits.guardedness.toFixed(3)}`);
   check('明显变冷（温暖下降）', r.state.traits.warmth < 0.60, `warmth=${r.state.traits.warmth.toFixed(3)}`);
-  check('突变不超过 1 次', r.mutations <= 1, `${r.mutations} 次`);
+  // v0.3 起阈值重标定，240 轮极端冲突允许最多 2 次突变
+  check('突变不超过 2 次', r.mutations <= 2, `${r.mutations} 次`);
 }
 
 console.log();
 console.log('=== 场景 3：single-shock（单次最强打击）===');
-// 尖点突变的核心断言：单次打击**不能**突变（sensitivity 不够）
+//
+// v0.3 起突变是**五条件**：shock + load + sensitivity + trustDamage + 事件次数。
+// 所以"两次打击就突变"的旧断言不再成立 —— 那正是要修掉的脆弱性。
+// 现在要验证的是更强的保证：**单次事件无论多重都不会突变**。
 {
   const s = initialState();
   const ep = appraise({ kind: 'loss', relevance: 1.0, valence: -1.0, novelty: 1.0 });
   const { state: after, transition } = step(s, ep);
-  console.log(`    load=${after.load.toFixed(3)} sensitivity=${after.sensitivity.toFixed(3)} shock=${(ep.magnitude).toFixed(3)}`);
-  check('单次打击不突变（load 够但 sens 不够）', transition.mutated === null);
+  console.log(`    load=${after.load.toFixed(3)} sensitivity=${after.sensitivity.toFixed(3)} trust=${after.trustDamage.toFixed(3)} 事件=${after.negativeSinceMutation}`);
+  check('单次打击不突变', transition.mutated === null);
   check('load 确实累积了', after.load > MUTATE_LOAD * 0.9, `load=${after.load.toFixed(3)}`);
-  check('sensitivity 未达阈值', after.sensitivity < MUTATE_SENSITIVITY, `sens=${after.sensitivity.toFixed(3)}`);
+  check('关系损伤累积了', after.trustDamage > 0, `trust=${after.trustDamage.toFixed(3)}`);
 
-  // 连续第二次相同打击 → 应当突变（这就是"压垮骆驼的最后一根稻草"）
-  const second = step(after, appraise({ kind: 'loss', relevance: 1.0, valence: -1.0, novelty: 1.0 }));
-  check('连续第二次打击触发突变（折叠生效）', second.transition.mutated !== null,
-    second.transition.mutated ? JSON.stringify(second.transition.mutated.delta) : '未突变');
+  // 第二次仍不突变：事件计数还不够
+  const second = step(after, ep);
+  check('第二次打击仍不突变（事件次数门槛）', second.transition.mutated === null,
+    `事件=${second.state.negativeSinceMutation}/${MUTATE_MIN_EVENTS}`);
+
+  // 极端状态验证：即使 load/sens/trust 全部拉满，单次事件也不突变
+  const loaded = initialState();
+  loaded.load = 1.5; loaded.sensitivity = 1.0; loaded.trustDamage = 1.5;
+  const forced = step(loaded, ep);
+  check('极端负荷下单次事件仍不突变', forced.transition.mutated === null,
+    '这是"几句气话毁不掉人格"的硬保证');
+
+  // 累计到门槛后才突变
+  let cur = loaded;
+  for (let i = 0; i < MUTATE_MIN_EVENTS; i++) cur = step(cur, ep).state;
+  check(`累计 ${MUTATE_MIN_EVENTS} 次后触发突变`, cur.mutations.length > 0);
 }
 
 console.log();

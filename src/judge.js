@@ -20,7 +20,7 @@
  * 宁可准确率掉到 45%，也不让人格在限流期间停止工作。
  */
 
-import { extractSignals, inferEventKind, calibrateValence } from './signals.js';
+import { extractSignals, inferEventKind, calibrateValence, applyKindRelevance } from './signals.js';
 import { appraise } from './persona-core.js';
 
 /** 判定结果的事件类型全集 */
@@ -290,16 +290,34 @@ function conservativeFallback(text) {
  * strain 恒为 0，人格永不变化。
  */
 export function toEpisode(kind, text) {
-  const sig = extractSignals(text);
+  // 先补事件类型带来的相关性下限，再算 valence/novelty —— 顺序很重要
+  let sig = extractSignals(text);
+  sig = applyKindRelevance(sig, kind);
   const valence = calibrateValence(kind, sig);
-  // 直接返回 appraise() 的产物 —— 它才是 step() 的入参。
-  // 早期版本返回裸参数，调用方忘了包一层 appraise 就得到 load=NaN，
-  // 而 NaN 会静默污染整个状态（比较运算全部为 false，不报错）。
+
+  /**
+   * 修正 novelty 的计算顺序。
+   *
+   * 原实现用**校正前**的 valence 算 novelty（在 signals.js 里），
+   * 而 calibrateValence 是在这里才把背叛校正为 −0.85。
+   * 后果：一句"你骗了我"原始 valence=0，拿不到「强情感」那 0.3 分，
+   * novelty 只有 0.15 → shock = 0.85×0.38×0.15 = 0.049，差门槛 10 倍。
+   *
+   * 实测：连续 5 次背叛 load 都堆到 1.38 了，shock 恒为 0.049，永不突变。
+   * 也就是说这个插件最有设计感的功能在真实文本上是死的。
+   *
+   * 这里用**校正后**的 valence 重算，让"这句话有多重"真正进入 novelty。
+   */
+  const novelty = Math.min(1,
+    (text.length > 60 ? 0.4 : 0.15)
+      + (Math.abs(valence) > 0.5 ? 0.3 : 0)
+      + (sig.selfDisclosure >= 0.75 ? 0.3 : 0));
+
   return appraise({
     kind,
     relevance: sig.relevance,
     valence,
-    novelty: sig.novelty,
+    novelty,
     agency: sig.agency,
     text,
   });

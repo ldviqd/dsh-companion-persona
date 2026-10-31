@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.6.0
+
+Resolution detection now asks the model first; the rule table is demoted to a
+fallback. It was measuring badly.
+
+### Measurement
+
+16 real phrasings about an ongoing "mother in hospital" anchor:
+
+| method | clear correct | clear wrong | undecidable |
+|---|---|---|---|
+| rules | 6 | **5** | 5 |
+| model | **15/16 (94%)** | 0 | 1 |
+
+The dangerous ones weren't misses, they were inversions:
+
+- **「出院手续还没办」→ rules say `resolved`.** She has not left the hospital;
+  the paperwork just isn't done. Meaning reversed.
+- 「手术很成功」→ rules say `unknown` (no keyword matched)
+- 「总算熬过来了」→ `unknown`
+
+Negation, conditionals and irony are ordinary in Chinese. A keyword table cannot
+be patched into correctness — every fix invites the next counter-example.
+
+### Cost
+
+Resolution checking only runs when a turn is actually relevant to an open anchor
+— measured at **~13% of turns**, not every turn. Plus a verdict cache keyed by
+`anchorId + text prefix`. Roughly 1.7s when it fires.
+
+### New layering
+
+1. model verdict (primary)
+2. model unavailable → rule fallback
+3. neither decides → stay `open`
+
+"Never move on an unclear verdict" is unchanged: closing an anchor by mistake
+means that memory can never surface again.
+
+`processResolution` no longer runs the rules before the model — the old order
+meant a confident-but-wrong rule could suppress the model entirely.
+
+### Tests
+
+e2e 50 → **55 assertions**, now covering the inversion case explicitly
+("出院手续还没办" must not resolve), model-failure fallback, and the cost gate
+(an unrelated turn must not call the model).
+
 ## 0.5.0
 
 Anchor lifecycle completed: resolution detection, manual control, decay.

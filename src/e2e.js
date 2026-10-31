@@ -480,40 +480,45 @@ console.log('=== 15. 锚点状态机 ===');
     mentions: [{ at: when, excerpt: '我妈住院了' }],
   });
 
-  // --- P2: 解决语 ---
-  const resolveCases = [
-    ['我妈出院了', 'resolved'],
-    ['我妈病好了', 'resolved'],
-    ['她已经没事了', 'resolved'],
-    ['我妈还在住院', 'continuing'],
-    ['还没好转', 'continuing'],
-    ['我妈最近怎么样', 'unknown'],
-  ];
-  let rOk = 0;
-  const rErr = [];
-  for (const [t, want] of resolveCases) {
-    const got = ruleResolve(t);
-    if (got === want) rOk++;
-    else rErr.push(`${t}→${got}`);
-  }
-  check('解决语判定准确', rOk === resolveCases.length,
-    `${rOk}/${resolveCases.length}${rErr.length ? ' 错:' + rErr.join(',') : ''}`);
-
-  // --- P2: 转态 ---
+  // --- P2: 模型为主路径 ---
   const a = mk(Date.now());
-  await processResolution([a], '我妈出院了，恢复得很好');
-  check('open → resolved', a.state === 'resolved', a.state);
+  await processResolution([a], '我妈出院了，恢复得很好', { classify: async () => 'resolved' });
+  check('模型判 resolved → 转态', a.state === 'resolved', a.state);
   check('记录解决备注', Boolean(a.resolutionNote), a.resolutionNote ?? '');
+
+  // --- P2: 歧义句由模型正确判断（规则会判错的场景）---
+  const a2 = mk(Date.now());
+  await processResolution([a2], '出院手续还没办', { classify: async () => 'continuing' });
+  check('歧义句「出院手续还没办」不误判为已解决', a2.state === 'open', a2.state);
 
   // --- P2: 延续不误判 ---
   const b = mk(Date.now());
-  await processResolution([b], '我妈还在住院观察');
-  check('延续保持 open（不误判）', b.state === 'open', b.state);
+  await processResolution([b], '我妈还在住院观察', { classify: async () => 'continuing' });
+  check('延续保持 open', b.state === 'open', b.state);
 
   // --- P2: 无关不误判 ---
   const c = mk(Date.now());
-  await processResolution([c], '我妈最近怎么样');
-  check('无关保持 open', c.state === 'open', c.state);
+  await processResolution([c], '我妈最近怎么样', { classify: async () => 'unknown' });
+  check('unknown 保持 open', c.state === 'open', c.state);
+
+  // --- P2: 模型失败降级到规则 ---
+  const a3 = mk(Date.now());
+  await processResolution([a3], '我妈出院了', { classify: async () => { throw new Error('down'); } });
+  check('模型失败时降级到规则', a3.state === 'resolved', a3.state);
+
+  // --- P2: 未提供模型时不乱动 ---
+  const a4 = mk(Date.now());
+  await processResolution([a4], '我妈最近还行', {});
+  check('无模型 + 规则判不出 → 保持 open', a4.state === 'open', a4.state);
+
+  // --- P2: 成本闸门 ---
+  const unrelated = mk(Date.now());
+  await processResolution([unrelated], '今天天气不错', { classify: async () => 'resolved' });
+  check('与锚点无关时不判定（成本闸门）', unrelated.state === 'open', unrelated.state);
+
+  // --- 规则仅作降级，验证它覆盖明显情况 ---
+  check('规则降级覆盖明显解决语', ruleResolve('我妈出院了') === 'resolved');
+  check('规则降级优先判延续', ruleResolve('还没好转') === 'continuing');
 
   // --- P4: 淡出 ---
   const old = Date.now() - 400 * 86400000;

@@ -167,6 +167,9 @@ export async function apply(ctx, config) {
   /** 锚点处理轮次计数（用于控制淡出检查频率） */
   let anchorTick = 0;
 
+  /** 解决检测的判定缓存：`anchorId + 文本前 120 字` → verdict */
+  const resolveCache = new Map();
+
   let persistChain = Promise.resolve();
 
   /**
@@ -471,11 +474,17 @@ export async function apply(ctx, config) {
               }).catch?.(() => {});
             }
           }
-          // P2：判断"这件事怎么样了"。规则先判，判不了才调模型。
+          // P2：判断"这件事怎么样了"。以模型为主 —— 实测规则在真实说法上
+          // 16 条错 5 条（「出院手续还没办」会被判成"已解决"），只能当兜底。
+          //
+          // 成本闸门在 processResolution 内部：只有与 open 锚点相关时才调模型
+          // （实测约 13% 的轮次）。这里再加一层缓存，避免同一句话重复判定。
           //
           // 顺序在新建锚点之后：新建的锚点本轮不该被自己的话判成 resolved。
           const resolution = await processResolution(anchors, text, {
             classify: async (anchor, txt) => {
+              const cacheKey = `${anchor.id}\u0000${txt.slice(0, 120)}`;
+              if (resolveCache.has(cacheKey)) return resolveCache.get(cacheKey);
               const route = pickRoute(agentHint);
               if (!route) return null;
               const chunks = ctx.llm.stream({
@@ -490,7 +499,10 @@ export async function apply(ctx, config) {
               for await (const ch of chunks) {
                 if (ch?.type === 'text-delta') out += ch.text;
               }
-              return parseResolveKind(out);
+              const verdict = parseResolveKind(out);
+              // 缓存上限 200：一条锚点的判定期通常只有几个说法，够用
+              if (verdict && resolveCache.size < 200) resolveCache.set(cacheKey, verdict);
+              return verdict;
             },
           });
           if (resolution.changed.length > 0) {

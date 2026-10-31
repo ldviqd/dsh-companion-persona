@@ -134,49 +134,58 @@ export function selectRecall(anchors, text, now = Date.now()) {
  */
 export async function processResolution(anchors, text, deps = {}) {
   const changed = [];
-  const pending = [];
+  const checked = [];
 
   for (const a of anchors) {
     if (!a || a.state !== 'open') continue;
 
+    // 只有"在聊这件事"时才判 —— 这是成本闸门，实测约 13% 的轮次
     const scored = scoreTrigger(a, text);
     if (!isRelatedToAnchor(scored)) continue;
 
-    const verdict = ruleResolve(text);
+    checked.push(a.id);
+
+    // 主路径：交给模型。规则在真实说法上错误率太高（实测 16 条错 5 条），
+    // 只能当兜底。这里不预先跑规则，避免"规则错判导致根本没机会问模型"。
+    let verdict = null;
+    let source = 'none';
+
+    if (deps.classify) {
+      try {
+        verdict = await deps.classify(a, text);
+        source = 'model';
+      } catch {
+        verdict = null;   // 模型失败 → 落到规则
+      }
+    }
+
+    // 降级：只在模型**完全失败**时才用规则（它多半返回 unknown，即"不动"）。
+    // 模型给出了明确标签就先信模型 —— 规则在歧义句上不如它。
+    if (verdict === null) {
+      const ruleVerdict = ruleResolve(text);
+      if (ruleVerdict !== 'unknown') {
+        verdict = ruleVerdict;
+        source = 'fallback-rule';
+      } else {
+        verdict = 'unknown';
+        source = 'none';
+      }
+    }
 
     if (verdict === 'resolved') {
       a.state = 'resolved';
       a.resolvedAt = Date.now();
       a.resolutionNote = resolveNote(text);
-      changed.push({ anchor: a, verdict, source: 'rule' });
+      changed.push({ anchor: a, verdict, source });
     } else if (verdict === 'continuing') {
-      // 明确延续 → 保持 open，但记一次提及
+      // 明确延续 → 保持 open，记一次提及（说明还在聊这件事）
       a.mentions = a.mentions ?? [];
       a.mentions.push({ at: Date.now(), excerpt: summarize(text, 80) });
-    } else {
-      // 规则判不了 → 交给模型（如果提供了 classify）
-      pending.push({ anchor: a, text });
     }
+    // unknown → 什么都不做。判不清就不动。
   }
 
-  // 可选：模型判定
-  if (deps.classify && pending.length > 0) {
-    for (const item of pending) {
-      try {
-        const verdict = await deps.classify(item.anchor, item.text);
-        if (verdict === 'resolved') {
-          item.anchor.state = 'resolved';
-          item.anchor.resolvedAt = Date.now();
-          item.anchor.resolutionNote = resolveNote(item.text);
-          changed.push({ anchor: item.anchor, verdict, source: 'model' });
-        }
-      } catch {
-        // 判定失败就不动 —— 保持 open 比误判成 resolved 安全
-      }
-    }
-  }
-
-  return { changed, pending };
+  return { changed, checked };
 }
 
 /**

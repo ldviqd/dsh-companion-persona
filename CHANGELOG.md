@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.1
+
+Docs only. Removed an internal development note from the README: it described an
+open design question about overlap with a companion memory plugin, pointed at a
+path that does not exist in this repository, and was addressed to ourselves
+rather than to anyone reading the package. Also merged two adjacent "implemented"
+lines in the status section.
+
+No code change.
+
 ## 0.6.0
 
 Resolution detection now asks the model first; the rule table is demoted to a

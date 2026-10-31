@@ -480,6 +480,22 @@ console.log('=== 15. 锚点状态机 ===');
     mentions: [{ at: when, excerpt: '我妈住院了' }],
   });
 
+  // --- 运行时开关（v0.6.3）---
+  {
+    const st = initialState();
+    check('锚点开关默认开启', st.enabled?.anchor !== false);
+
+    // 关闭锚点不应影响人格开关
+    const off = { ...st, enabled: { ...st.enabled, anchor: false } };
+    check('关闭锚点不影响 inject/evolve',
+      off.enabled.inject === true && off.enabled.evolve === true);
+
+    // 旧状态文件（无 anchor 字段）应默认开启
+    const legacy = { inject: true, evolve: true };
+    const migrated = { ...legacy, anchor: legacy.anchor !== false };
+    check('旧状态文件兼容（默认开启）', migrated.anchor === true);
+  }
+
   // --- P2: 模型为主路径 ---
   const a = mk(Date.now());
   await processResolution([a], '我妈出院了，恢复得很好', { classify: async () => 'resolved' });

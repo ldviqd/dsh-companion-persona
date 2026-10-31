@@ -106,6 +106,8 @@ async function loadState(file) {
         parsed.enabled = {
           inject: parsed.enabled.inject !== false,
           evolve: parsed.enabled.evolve !== false,
+          // 旧状态文件没有 anchor 字段 → 默认启用（跟随静态配置）
+          anchor: parsed.enabled.anchor !== false,
         };
       }
       // 兼容旧状态文件：补齐排除规则
@@ -143,7 +145,15 @@ export async function apply(ctx, config) {
   const anchorPath = join(statePath, '..', 'anchors.json');
   const logger = ctx.logger?.('companion-persona');
   let state = await loadState(statePath);
-  let anchors = config.anchorEnabled ? await loadAnchors(anchorPath) : [];
+  /**
+   * 锚点是否启用：运行时开关优先，否则跟随静态配置。
+   *
+   * 为什么要运行时开关：静态配置改了要重启，而用户装别的记忆插件、
+   * 想临时关掉锚点避冲突时，不会愿意为这个重启一次。
+   */
+  const anchorOn = () => (state.enabled?.anchor ?? config.anchorEnabled);
+
+  let anchors = anchorOn() ? await loadAnchors(anchorPath) : [];
   // 首次运行：用配置里的名字作为初始值（之后可在面板改）
   if (!state.identity.name && config.name) {
     state = { ...state, identity: { ...state.identity, name: config.name } };
@@ -296,7 +306,7 @@ export async function apply(ctx, config) {
       // 人格段是**稳定身份**，每次装配都是同一段话；
       // 锚点是**此刻想起的事**，每轮都可能不同。
       // 混在一个 section 里会让"我是谁"看起来每轮都在变。
-      if (config.anchorEnabled) {
+      if (anchorOn()) {
         const recallDisposer = agentCtx.systemPrompt.section({
           name: 'companion-anchor-recall',
           order: config.order + 5,   // 紧跟人格段之后
@@ -438,7 +448,7 @@ export async function apply(ctx, config) {
       //
       // 顺序很关键：先用**本轮文本**召回（此时锚点库还是注入前的状态），
       // 再决定是否新建锚点。反过来会让本轮刚建出的锚点立刻自己触发自己。
-      if (config.anchorEnabled) {
+      if (anchorOn()) {
         try {
           // P4a：淡出的锚点若被再次提到，先复活（这样本轮就能召回它）
           const revived = reviveIfMentioned(anchors, text, Date.now());
@@ -651,8 +661,8 @@ export async function apply(ctx, config) {
           // 记忆锚点（面板展示）
           // 当前上下文的排除状态：面板要能解释"为什么没有锚点/没有变化"
           exclusion: currentExclusion,
-          anchorEnabled: config.anchorEnabled,
-          anchors: config.anchorEnabled
+          anchorEnabled: anchorOn(),
+          anchors: anchorOn()
             ? anchors.map((a) => ({
                 id: a.id,
                 summary: a.summary,
@@ -692,7 +702,7 @@ export async function apply(ctx, config) {
     async toggle(payload) {
       const next = { ...state.enabled };
       let touched = false;
-      for (const key of ['inject', 'evolve']) {
+      for (const key of ['inject', 'evolve', 'anchor']) {
         const v = payload?.[key];
         if (typeof v === 'boolean' && next[key] !== v) {
           next[key] = v;
@@ -794,7 +804,7 @@ export async function apply(ctx, config) {
      * 让用户手改内容会破坏 triggers 与 summary 的一致性。
      */
     async anchor(payload) {
-      if (!config.anchorEnabled) {
+      if (!anchorOn()) {
         return { ok: false, error: { message: '锚点功能未启用' } };
       }
 

@@ -209,7 +209,7 @@ export function initialState(overrides = {}) {
      * config.name 只作为首次初始化的默认值。
      */
     identity: { name: '', userName: '' },
-    enabled: { inject: true, evolve: true },
+    enabled: { inject: true, evolve: true, anchor: true },
     /**
      * 排除规则：让某些会话不参与人格形成。
      *

@@ -374,6 +374,46 @@ window.__ModuleLoader__.load({
           h('div', { style: C.swKnob(en.evolve) })),
       ]));
 
+      // 记忆锚点开关
+      const anchorOn = en.anchor !== false;
+      children.push(h('div', {
+        key: 'sw-anchor', style: C.sw(anchorOn),
+        onClick: () => void setSwitch('anchor', !anchorOn),
+      }, [
+        h('span', { key: 'l' }, [
+          '记忆锚点',
+          h('div', { key: 'd', style: { fontSize: 10, opacity: 0.55, marginTop: 2 } },
+            anchorOn
+              ? '从对话里抽取情感事件，提及相关词时会"想起"'
+              : '已关闭：不再抽取、不再注入回忆（已有锚点保留，可随时恢复）'),
+        ]),
+        h('div', { key: 't', style: C.swDot(anchorOn) },
+          h('div', { style: C.swKnob(anchorOn) })),
+      ]));
+
+      // 冲突提示：仅在启用时显示
+      if (anchorOn) {
+        children.push(h('div', {
+          key: 'anchor-conflict-hint',
+          style: {
+            marginTop: 6, padding: '8px 10px', borderRadius: 6, fontSize: 11,
+            lineHeight: '17px',
+            background: 'rgba(210,153,34,0.08)',
+            border: '1px solid rgba(210,153,34,0.25)',
+            color: 'inherit', opacity: 0.85,
+          },
+        }, [
+          h('div', { key: 'h', style: { fontWeight: 600, marginBottom: 3 } },
+            '⚠ 与其他记忆插件同时启用时'),
+          h('div', { key: 'b' },
+            '如果另外装了带"锚点"或"回忆"功能的记忆插件（它们也会在相关词出现时注入往事），'
+            + '两边的回忆可能重复出现，导致同一件事被提起两次。'
+            + '这种情况下建议关闭本插件的记忆锚点，只保留一个来源。'),
+          h('div', { key: 'f', style: { marginTop: 4, opacity: 0.7 } },
+            '关闭不会删除已有锚点 —— 重新打开即恢复。'),
+        ]));
+      }
+
       // 人格段预览（模型实际看到的内容）
       children.push(h('div', { key: 'prev-h', style: C.h }, '模型的自我认知（注入内容）'));
       if (en.inject === false) {

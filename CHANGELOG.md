@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.3
+
+Memory anchors gained a runtime switch, and the panel now warns about running
+alongside another anchor-style memory plugin.
+
+`anchorEnabled` was a static config field, so turning anchors off meant editing
+the profile and restarting. Users who install a different memory plugin and want
+to avoid double recollection should not have to restart for that.
+
+- `state.enabled` gained `anchor`, alongside `inject` and `evolve`; `anchorOn()`
+  resolves runtime switch first, static config second. Old state files without
+  the field default to enabled.
+- panel switch shows what off means: no extraction, no recall injection, existing
+  anchors kept.
+- while anchors are on, the panel shows a note: if another plugin also injects
+  recollections on keyword matches, the same event may surface twice, and turning
+  this one off is the way to keep a single source. Closing does not delete
+  anchors — reopening restores them.
+
+e2e 55 -> 58 assertions (default value, independence from the other switches,
+legacy state migration).
+
 ## 0.6.2
 
 Docs only. Replaced references to a specific internal companion-memory plugin with

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.2
+
+Docs only. Replaced references to a specific internal companion-memory plugin with
+generic wording ("fact memory") in the README and in `anchor.js`'s module comment.
+Readers of this package have no reason to know our internal project layout.
+
+No code change; all 55 assertions still pass.
+
 ## 0.6.1
 
 Docs only. Removed an internal development note from the README: it described an

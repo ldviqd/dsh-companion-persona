@@ -157,6 +157,8 @@ window.__ModuleLoader__.load({
       // 导致 hook 调用数随渲染变化 → React 抛错 → 整个面板空白。
       const [pickWs, setPickWs] = React.useState('');
       const [pickSid, setPickSid] = React.useState('');
+      // 手动添加锚点的输入
+      const [newAnchor, setNewAnchor] = React.useState('');
       // 身份编辑：本地草稿，保存前不影响真实状态
       const [draftName, setDraftName] = React.useState(null);
       const [draftUserName, setDraftUserName] = React.useState(null);
@@ -532,6 +534,17 @@ window.__ModuleLoader__.load({
                     },
                   }, '标记已解决')
                 : null,
+              a.state === 'resolved'
+                ? h('button', {
+                    key: 'ro', style: { ...C.btn, fontSize: 11, padding: '3px 8px' },
+                    onClick: async () => {
+                      try {
+                        await callRpc('anchor', { id: a.id, action: 'reopen' });
+                        await load();
+                      } catch (err) { setError(err?.message ?? String(err)); }
+                    },
+                  }, '重新打开')
+                : null,
               a.state !== 'faded'
                 ? h('button', {
                     key: 'fd', style: { ...C.btn, fontSize: 11, padding: '3px 8px' },
@@ -543,9 +556,61 @@ window.__ModuleLoader__.load({
                     },
                   }, '淡出')
                 : null,
+              a.state === 'faded'
+                ? h('button', {
+                    key: 'rv', style: { ...C.btn, fontSize: 11, padding: '3px 8px' },
+                    onClick: async () => {
+                      try {
+                        await callRpc('anchor', { id: a.id, action: 'revive' });
+                        await load();
+                      } catch (err) { setError(err?.message ?? String(err)); }
+                    },
+                  }, '复活')
+                : null,
+              h('button', {
+                key: 'del', style: { ...C.btn, fontSize: 11, padding: '3px 8px', opacity: 0.7 },
+                onClick: async () => {
+                  if (!window.confirm(`删除「${a.summary}」？这一步不可撤销。`)) return;
+                  try {
+                    await callRpc('anchor', { id: a.id, action: 'delete' });
+                    await load();
+                  } catch (err) { setError(err?.message ?? String(err)); }
+                },
+              }, '删除'),
             ].filter(Boolean)),
           ]));
         }
+
+        // 手动添加：给用户的控制权 —— 自动判据抓不到的，人可以主动说"记住"
+        children.push(h('div', { key: 'anc-add', style: { ...C.row, marginTop: 8 } }, [
+          h('input', {
+            key: 'i', style: C.input, value: newAnchor,
+            placeholder: '手动记住一件事（如"我妈住院了"）',
+            maxLength: 60,
+            onChange: (e) => setNewAnchor(e.target.value),
+            onKeyDown: async (e) => {
+              if (e.key !== 'Enter' || !newAnchor.trim()) return;
+              try {
+                await callRpc('anchor', { action: 'create', summary: newAnchor.trim() });
+                setNewAnchor('');
+                await load();
+                await loadLedger(showAll ? 200 : 10);
+              } catch (err) { setError(err?.message ?? String(err)); }
+            },
+          }),
+          h('button', {
+            key: 'b', style: C.btn, disabled: !newAnchor.trim(),
+            onClick: async () => {
+              if (!newAnchor.trim()) return;
+              try {
+                await callRpc('anchor', { action: 'create', summary: newAnchor.trim() });
+                setNewAnchor('');
+                await load();
+                await loadLedger(showAll ? 200 : 10);
+              } catch (err) { setError(err?.message ?? String(err)); }
+            },
+          }, '记住'),
+        ]));
       }
 
       // 最近变更

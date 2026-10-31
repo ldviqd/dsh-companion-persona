@@ -11,6 +11,7 @@ import {
   ANCHOR_STATES, shouldCreateAnchor, buildTriggers, scoreTrigger,
   summarize, makeAnchorId, isSameTopic,
 } from './anchor.js';
+import { ruleResolve, resolveNote, isRelatedToAnchor } from './anchor-resolve.js';
 
 const MAX_ANCHORS = 200;
 /** 注入冷却：同一锚点这段时间内不重复注入 */
@@ -19,6 +20,24 @@ export const RECALL_COOLDOWN_MS = 60 * 60 * 1000;
 export const MAX_INJECT = 3;
 /** 每次被回忆后权重轻微下降，避免同一件事反复被想起 */
 const WEIGHT_DECAY_PER_RECALL = 0.98;
+
+/**
+ * 淡出规则。
+ *
+ * 设计意图：不是"清理垃圾"，是模拟记忆的自然沉降。
+ * 一件解决了的事长期不提，就不该再主动涌上来 —— 但如果再次被提到，可以复活。
+ *
+ * 两条同时满足才淡出：
+ *   1. 超过 fadeAfterDays 天没被提及
+ *   2. 权重低于 fadeWeightBelow
+ *
+ * 为什么两个条件都要：只看时间会让重要的事被埋掉（"奶奶去世"一年不提也该记住）；
+ * 只看权重会让刚发生的小事立刻沉下去。
+ */
+export const FADE_AFTER_DAYS = 365;
+export const FADE_WEIGHT_BELOW = 0.40;
+/** 已解决的锚点可以更早淡出 —— 事情过去了，不必一直占着 */
+export const FADE_RESOLVED_AFTER_DAYS = 90;
 
 /** 读锚点库。容忍文件缺失与损坏。 */
 export async function loadAnchors(file) {
@@ -96,6 +115,128 @@ export function selectRecall(anchors, text, now = Date.now()) {
   }
   out.sort((x, y) => y.rank - x.rank);
   return out.slice(0, MAX_INJECT);
+}
+
+/**
+ * 处理"这件事怎么样了"。
+ *
+ * 对每个 open 的锚点：如果本轮发言与它相关，判定是 resolved / continuing / unrelated。
+ * 只有 resolved 才转态；continuing 什么都不做（保持 open）；unrelated 也什么都不做。
+ *
+ * **宁可不动，不可乱动**：误把 open 改成 resolved，那段记忆就再也不会被想起来了。
+ *
+ * @param {Array} anchors 全部锚点
+ * @param {string} text 本轮发言
+ * @param {object} [deps]
+ * @param {(anchor, text) => Promise<string|null>} [deps.classify] 模型判定，可选
+ * @returns {Promise<{changed: Array, pending: Array}>}
+ *   changed: 已转态的锚点；pending: 规则未定、需要模型判的 [{anchor, text}]
+ */
+export async function processResolution(anchors, text, deps = {}) {
+  const changed = [];
+  const pending = [];
+
+  for (const a of anchors) {
+    if (!a || a.state !== 'open') continue;
+
+    const scored = scoreTrigger(a, text);
+    if (!isRelatedToAnchor(scored)) continue;
+
+    const verdict = ruleResolve(text);
+
+    if (verdict === 'resolved') {
+      a.state = 'resolved';
+      a.resolvedAt = Date.now();
+      a.resolutionNote = resolveNote(text);
+      changed.push({ anchor: a, verdict, source: 'rule' });
+    } else if (verdict === 'continuing') {
+      // 明确延续 → 保持 open，但记一次提及
+      a.mentions = a.mentions ?? [];
+      a.mentions.push({ at: Date.now(), excerpt: summarize(text, 80) });
+    } else {
+      // 规则判不了 → 交给模型（如果提供了 classify）
+      pending.push({ anchor: a, text });
+    }
+  }
+
+  // 可选：模型判定
+  if (deps.classify && pending.length > 0) {
+    for (const item of pending) {
+      try {
+        const verdict = await deps.classify(item.anchor, item.text);
+        if (verdict === 'resolved') {
+          item.anchor.state = 'resolved';
+          item.anchor.resolvedAt = Date.now();
+          item.anchor.resolutionNote = resolveNote(item.text);
+          changed.push({ anchor: item.anchor, verdict, source: 'model' });
+        }
+      } catch {
+        // 判定失败就不动 —— 保持 open 比误判成 resolved 安全
+      }
+    }
+  }
+
+  return { changed, pending };
+}
+
+/**
+ * 执行淡出。把长期沉默且权重低的锚点标记为 faded。
+ *
+ * 不删除 —— faded 是可恢复的，再次提及时会被复活（见 reviveIfMentioned）。
+ *
+ * @returns {Array} 本次被淡出的锚点
+ */
+export function applyFade(anchors, now = Date.now()) {
+  const faded = [];
+  const day = 86400000;
+
+  for (const a of anchors) {
+    if (!a || a.state === 'faded') continue;
+
+    const last = Math.max(
+      a.lastRecalledAt ?? 0,
+      a.when ?? 0,
+      ...(a.mentions ?? []).map((m) => m.at ?? 0),
+    );
+    const idleDays = (now - last) / day;
+
+    // 已解决的事：淡出得更快（事情过去了）
+    const threshold = a.state === 'resolved' ? FADE_RESOLVED_AFTER_DAYS : FADE_AFTER_DAYS;
+
+    if (idleDays >= threshold && (a.weight ?? 0) < FADE_WEIGHT_BELOW) {
+      a.fadedFrom = a.state;   // 记住淡出前的状态，复活时恢复
+      a.state = 'faded';
+      a.fadedAt = now;
+      faded.push(a);
+    }
+  }
+
+  return faded;
+}
+
+/**
+ * 复活：淡出的锚点再次被提及时，重新变为 open（若原本是 resolved 则恢复 resolved）。
+ *
+ * 这是"淡出 ≠ 删除"的意义：人也会忘记很久以前的事，
+ * 但一旦有人提起，那些事又回来了。
+ */
+export function reviveIfMentioned(anchors, text, now = Date.now()) {
+  const revived = [];
+  for (const a of anchors) {
+    if (!a || a.state !== 'faded') continue;
+    const scored = scoreTrigger(a, text);
+    if (!isRelatedToAnchor(scored)) continue;
+
+    // 恢复淡出前的状态（存在 fadedFrom 里，没有就退回 open）
+    a.state = a.fadedFrom ?? 'open';
+    delete a.fadedFrom;
+    delete a.fadedAt;
+    a.revivedAt = now;
+    a.mentions = a.mentions ?? [];
+    a.mentions.push({ at: now, excerpt: summarize(text, 80) });
+    revived.push(a);
+  }
+  return revived;
 }
 
 /** 标记一次回忆：更新计数与权重衰减 */

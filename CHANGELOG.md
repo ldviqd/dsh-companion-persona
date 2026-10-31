@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.5.0
+
+Anchor lifecycle completed: resolution detection, manual control, decay.
+
+### P2 — resolution detection
+
+An `open` anchor used to stay open forever. Three months later the model would
+still say "her mother is in hospital" when she had long since recovered.
+
+`ruleResolve()` classifies a turn as `resolved` / `continuing` / `unrelated`,
+costing nothing for the clear cases (出院 / 康复 / 没事了 vs 还在 / 复发 / 加重).
+Falling back to the model only when the rules are silent, and **never changing
+state on an unclear verdict** — wrongly closing an anchor means that memory can
+never surface again.
+
+Ordering detail: continuing is tested before resolved, because "还没好转" contains
+"好转" and would otherwise be read as recovery.
+
+### P4 — decay and revival
+
+Two conditions must both hold before an anchor fades: idle for longer than the
+threshold **and** weight below 0.40. Time alone would bury important memories
+(someone's grandmother dying should still be remembered after a year); weight
+alone would sink a small event the day after it happened. Resolved anchors fade
+sooner (90 days vs 365) — the matter is closed.
+
+Fading is not deletion. `fadedFrom` remembers the prior state, and any later
+mention revives the anchor back to it. People forget, and then someone brings it
+up and it comes back.
+
+### P3 — manual control
+
+The panel gained: manual creation ("remember this"), reopen (undo a mistaken
+resolve), revive (a faded anchor), and delete. Automatic extraction decides what
+is worth keeping by rule; these give the user the final say.
+
+### Verified end-to-end
+
+```
+"我妈住院了，我有点撑不住"  → anchor created
+"今天去医院看她"            → recalled
+"我妈还在住院观察"          → recalled, stays open
+"我妈出院了，恢复得不错"    → resolved, note recorded
+```
+
+Injected afterwards as: `- 今天 TA 提过「我妈住院了」（后来 我妈出院了）`
+— the memory survives with its ending attached.
+
+e2e 40 → **50 assertions**.
+
 ## 0.4.1
 
 The anchor panel silently disappeared when there were no anchors, which made a

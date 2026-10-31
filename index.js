@@ -31,8 +31,10 @@ import { extractSignals, inferEventKind, calibrateValence } from './src/signals.
 import { createJudge, toEpisode, CLASSIFIER_PROMPT } from './src/judge.js';
 import {
   loadAnchors, saveAnchors, maybeCreateAnchor, selectRecall,
-  markRecalled, renderRecall,
+  markRecalled, renderRecall, processResolution, applyFade, reviveIfMentioned,
 } from './src/anchor-store.js';
+import { RESOLVE_PROMPT, parseResolveKind } from './src/anchor-resolve.js';
+import { buildTriggers, makeAnchorId } from './src/anchor.js';
 import { appendLedger } from './src/ledger.js';
 
 export const name = 'companion-persona';
@@ -162,6 +164,8 @@ export async function apply(ctx, config) {
    * 没有这个字段时，用户看到空面板只会以为功能坏了 —— 实际是排除规则在生效。
    */
   let currentExclusion = null;
+  /** 锚点处理轮次计数（用于控制淡出检查频率） */
+  let anchorTick = 0;
 
   let persistChain = Promise.resolve();
 
@@ -433,6 +437,12 @@ export async function apply(ctx, config) {
       // 再决定是否新建锚点。反过来会让本轮刚建出的锚点立刻自己触发自己。
       if (config.anchorEnabled) {
         try {
+          // P4a：淡出的锚点若被再次提到，先复活（这样本轮就能召回它）
+          const revived = reviveIfMentioned(anchors, text, Date.now());
+          if (revived.length > 0) {
+            logger?.info?.(`锚点复活: ${revived.map((a) => a.summary).join(', ')}`);
+          }
+
           const recalled = selectRecall(anchors, text, Date.now());
           if (recalled.length > 0) {
             pendingRecallText = renderRecall(recalled);
@@ -461,6 +471,49 @@ export async function apply(ctx, config) {
               }).catch?.(() => {});
             }
           }
+          // P2：判断"这件事怎么样了"。规则先判，判不了才调模型。
+          //
+          // 顺序在新建锚点之后：新建的锚点本轮不该被自己的话判成 resolved。
+          const resolution = await processResolution(anchors, text, {
+            classify: async (anchor, txt) => {
+              const route = pickRoute(agentHint);
+              if (!route) return null;
+              const chunks = ctx.llm.stream({
+                provider: route.provider,
+                model: route.model,
+                system: RESOLVE_PROMPT.replace('{ANCHOR}', anchor.summary),
+                messages: [{ role: 'user', content: [{ type: 'text', text: txt }] }],
+                maxTokens: 12,
+                temperature: 0,
+              });
+              let out = '';
+              for await (const ch of chunks) {
+                if (ch?.type === 'text-delta') out += ch.text;
+              }
+              return parseResolveKind(out);
+            },
+          });
+          if (resolution.changed.length > 0) {
+            for (const c of resolution.changed) {
+              if (config.audit) {
+                appendLedger(join(statePath, '..', 'ledger.jsonl'), {
+                  at: Date.now(), kind: 'anchor-resolved', signals: {}, before: {}, after: {},
+                  transition: {},
+                  evidence: `锚点已解决「${c.anchor.summary}」：${c.anchor.resolutionNote ?? ''}(${c.source})`,
+                }).catch?.(() => {});
+              }
+            }
+          }
+
+          // P4b：定期执行淡出（每 20 轮检查一次，不必每轮扫）
+          anchorTick++;
+          if (anchorTick % 20 === 0) {
+            const faded = applyFade(anchors, Date.now());
+            if (faded.length > 0) {
+              logger?.info?.(`锚点淡出: ${faded.map((a) => a.summary).join(', ')}`);
+            }
+          }
+
           // 异步落盘，不阻塞人格更新
           void saveAnchors(anchorPath, anchors).catch((err) => {
             logger?.warn?.(`锚点保存失败: ${String(err?.message ?? err)}`);
@@ -732,6 +785,39 @@ export async function apply(ctx, config) {
       if (!config.anchorEnabled) {
         return { ok: false, error: { message: '锚点功能未启用' } };
       }
+
+      // 手动添加：用户说"记住这件事"。不经过自动判据 —— 这是给用户的控制权。
+      if (String(payload?.action ?? '') === 'create') {
+        const summary = String(payload?.summary ?? '').trim().slice(0, 60);
+        if (!summary) return { ok: false, error: { message: 'summary 不能为空' } };
+        const kind = String(payload?.kind ?? 'intimacy');
+        const created = {
+          id: makeAnchorId(Date.now()),
+          summary,
+          when: Date.now(),
+          kind,
+          weight: Math.max(0.3, Math.min(1, Number(payload?.weight) || 0.6)),
+          valence: -0.3,
+          state: 'open',
+          resolvedAt: null,
+          resolutionNote: null,
+          triggers: buildTriggers(kind, summary),
+          mentions: [{ at: Date.now(), excerpt: summary }],
+          recalledCount: 0,
+          lastRecalledAt: null,
+          manual: true,        // 标记来源：面板手动添加
+        };
+        anchors = [...anchors, created];
+        await saveAnchors(anchorPath, anchors);
+        if (config.audit) {
+          appendLedger(join(statePath, '..', 'ledger.jsonl'), {
+            at: Date.now(), kind: 'anchor-new', signals: {}, before: {}, after: {},
+            transition: {}, evidence: `手动添加锚点「${summary}」`,
+          }).catch?.(() => {});
+        }
+        return { ok: true, value: { anchors, note: `已记住「${summary}」` } };
+      }
+
       const id = String(payload?.id ?? '');
       const action = String(payload?.action ?? '');
       const target = anchors.find((a) => a.id === id);
@@ -743,9 +829,23 @@ export async function apply(ctx, config) {
         target.resolvedAt = Date.now();
         target.resolutionNote = String(payload?.note ?? '').trim() || null;
         note = `标记已解决「${target.summary}」`;
+      } else if (action === 'reopen') {
+        // 误标已解决时能改回来
+        target.state = 'open';
+        target.resolvedAt = null;
+        target.resolutionNote = null;
+        note = `重新打开「${target.summary}」`;
       } else if (action === 'fade') {
+        target.fadedFrom = target.state;   // 记住原状态，便于复活
         target.state = 'faded';
+        target.fadedAt = Date.now();
         note = `淡出「${target.summary}」`;
+      } else if (action === 'revive') {
+        target.state = target.fadedFrom ?? 'open';
+        delete target.fadedFrom;
+        delete target.fadedAt;
+        target.revivedAt = Date.now();
+        note = `复活「${target.summary}」`;
       } else if (action === 'delete') {
         anchors = anchors.filter((a) => a.id !== id);
         note = `删除锚点「${target.summary}」`;

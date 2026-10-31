@@ -1,6 +1,6 @@
 {
   "name": "dsh-companion-persona",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Long-term companion persona for DSH: trait dynamics, drift and catastrophe mutation, injected as a scoped system-prompt section.",
   "keywords": [
     "dsh",

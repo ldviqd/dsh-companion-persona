@@ -24,7 +24,9 @@ import { ruleFilter, parseKind, toEpisode, createJudge, KINDS } from './judge.js
 import { extractSignals } from './signals.js';
 import {
   maybeCreateAnchor, selectRecall, markRecalled, renderRecall,
+  processResolution, applyFade, reviveIfMentioned,
 } from './anchor-store.js';
+import { ruleResolve } from './anchor-resolve.js';
 import { shouldCreateAnchor, buildTriggers, scoreTrigger } from './anchor.js';
 import { rest as restPersona } from './persona-core.js';
 
@@ -463,6 +465,74 @@ console.log('=== 14. 记忆锚点 ===');
   check('注入含"你想起的事"', injected.includes('你想起的事'));
   check('注入明确"可以不说"', injected.includes('不合适就放在心里'));
   check('注入不含原始全文', !injected.includes('撑不住'));
+}
+
+// ---------------------------------------------------------------------------
+// 15. 锚点状态机（P2 解决检测 + P4 淡出复活）
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 15. 锚点状态机 ===');
+{
+  const mk = (when, weight = 0.8) => ({
+    id: 'a1', summary: '我妈住院了', state: 'open', when, weight,
+    triggers: buildTriggers('intimacy', '我妈住院了，我有点撑不住'),
+    mentions: [{ at: when, excerpt: '我妈住院了' }],
+  });
+
+  // --- P2: 解决语 ---
+  const resolveCases = [
+    ['我妈出院了', 'resolved'],
+    ['我妈病好了', 'resolved'],
+    ['她已经没事了', 'resolved'],
+    ['我妈还在住院', 'continuing'],
+    ['还没好转', 'continuing'],
+    ['我妈最近怎么样', 'unknown'],
+  ];
+  let rOk = 0;
+  const rErr = [];
+  for (const [t, want] of resolveCases) {
+    const got = ruleResolve(t);
+    if (got === want) rOk++;
+    else rErr.push(`${t}→${got}`);
+  }
+  check('解决语判定准确', rOk === resolveCases.length,
+    `${rOk}/${resolveCases.length}${rErr.length ? ' 错:' + rErr.join(',') : ''}`);
+
+  // --- P2: 转态 ---
+  const a = mk(Date.now());
+  await processResolution([a], '我妈出院了，恢复得很好');
+  check('open → resolved', a.state === 'resolved', a.state);
+  check('记录解决备注', Boolean(a.resolutionNote), a.resolutionNote ?? '');
+
+  // --- P2: 延续不误判 ---
+  const b = mk(Date.now());
+  await processResolution([b], '我妈还在住院观察');
+  check('延续保持 open（不误判）', b.state === 'open', b.state);
+
+  // --- P2: 无关不误判 ---
+  const c = mk(Date.now());
+  await processResolution([c], '我妈最近怎么样');
+  check('无关保持 open', c.state === 'open', c.state);
+
+  // --- P4: 淡出 ---
+  const old = Date.now() - 400 * 86400000;
+  const d = mk(old, 0.3);
+  const faded = applyFade([d], Date.now());
+  check('长期沉默 + 低权重 → faded', d.state === 'faded', d.state);
+  check('淡出记录原状态（供复活）', d.fadedFrom === 'open', String(d.fadedFrom));
+
+  // --- P4: 高权重不淡出 ---
+  const e = mk(old, 0.9);
+  applyFade([e], Date.now());
+  check('高权重不淡出（重要的事记得住）', e.state === 'open', e.state);
+
+  // --- P4: 复活 ---
+  const f = mk(old, 0.3);
+  applyFade([f], Date.now());
+  const revived = reviveIfMentioned([f], '我妈最近身体怎么样');
+  check('淡出后提及可复活', f.state !== 'faded', f.state);
+  check('复活返回被复活的锚点', revived.length === 1, `${revived.length} 条`);
 }
 
 // ---------------------------------------------------------------------------

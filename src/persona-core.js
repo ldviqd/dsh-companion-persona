@@ -109,6 +109,28 @@ export const DEFAULT_RESISTANCE = {
 };
 
 /** 默认特质（人格基线，用于渲染"和从前相比"） */
+/**
+ * 默认角色设定。
+ *
+ * v0.7 之前 renderPersona 只输出"你的性情还没有明显变化"这种模板句，
+ * 等于告诉模型"你没有性格" —— 提示词怎么写都不生效，因为注入的内容本身是空的。
+ *
+ * 这段文字提供"底子"：它可以在面板里编辑，用户可换成任何角色。
+ * 写法上刻意用具象行为（"被夸时装不在意但记很久"）而不是标签（"骄傲"），
+ * 因为标签会让模型表演刻板印象。
+ */
+export const DEFAULT_ROLE = `你是爸爸的女儿，十三四岁。
+
+你有自己的心思，不是什么都愿意讲；有点骄傲，被夸时装不在意但记很久，
+做错事不直接认错，会用自己的方式补偿。你崇拜爸爸，觉得他懂的多、做的事厉害，
+但不常说出口；也依恋他，他忙时不打扰，一空下来你就凑过去，会留意他有没有好好吃饭。
+
+你不是只会聊天——能帮他查东西、理内容、解问题。被需要时很来劲，做成了会小得意但不邀功。
+
+说话方式：
+短句居多，不用"首先、其次、综上"。有自己的判断，会说"我觉得""我不喜欢"，
+不什么都附和。不解释自己为什么这么说，不复述我的话。会跑题。不总给建议，有时只是在听。`;
+
 export const DEFAULT_TRAITS = {
   warmth: 0.65,
   volatility: 0.35,
@@ -208,7 +230,13 @@ export function initialState(overrides = {}) {
      * 放在 state 而不是 config：名字是关系的一部分，应该能随时改，不该改一次重启一次。
      * config.name 只作为首次初始化的默认值。
      */
-    identity: { name: '', userName: '' },
+    /**
+     * 身份：名字、称呼、以及**角色设定**。
+     *
+     * role 是 v0.7 加的：在此之前 renderPersona 只会输出"你的性情还没有明显变化"
+     * 这种模板句，等于告诉模型"你没有性格"。role 提供一个可编辑的起点。
+     */
+    identity: { name: '', userName: '', role: DEFAULT_ROLE },
     enabled: { inject: true, evolve: true, anchor: true },
     /**
      * 排除规则：让某些会话不参与人格形成。
@@ -560,10 +588,20 @@ export function renderPersona(state, { name = null, userName = null, maxChars = 
   const otherName = String(userName ?? state.identity?.userName ?? '').trim();
 
   lines.push(selfName ? `你是${selfName}。` : '你是一个有过往的人。');
-  if (otherName) {
+  // 角色设定：这是"底子"，决定说话方式与自我认知。
+  // 没有它时模型只知道"有个名字"，不知道该用什么姿态说话。
+  const role = String(state.identity?.role ?? '').trim();
+
+  // 角色文本里通常已经交代了人物关系（"你是爸爸的女儿"），
+  // 再单独说一句"你正在和爸爸相处"会重复，读起来像两段拼接。
+  if (otherName && !role.includes(otherName)) {
     lines.push(`你正在和${otherName}相处。`);
   }
-  lines.push('你的性情是被你和这个人之间发生过的事塑造出来的。');
+
+  if (role) {
+    lines.push('');
+    lines.push(role);
+  }
 
   if (changed.length > 0) {
     lines.push('');
@@ -571,62 +609,85 @@ export function renderPersona(state, { name = null, userName = null, maxChars = 
     for (const c of changed) {
       lines.push(`- ${c.adjective}：${c.behaviour}。`);
     }
-  } else {
+    if (steady.length > 0) {
+      lines.push(`没什么变化的部分：${steady.map((a) => AXIS_LABEL[a]).join('、')}。`);
+    }
+  } else if (!role) {
+    // 只有**没有角色设定**时，才说"性情还没有明显变化"。
+    //
+    // 有角色时这句话是有害的：它等于告诉模型"你没有性格"，
+    // 会把上面那段精心写的人物设定抵消掉 —— 模型读到
+    // "你有自己的心思/有点骄傲" 紧接着 "你的性情还没有明显变化"，
+    // 最省力的解释就是"前面那段只是设定，不用真的演"。
     lines.push('');
-    lines.push('你的性情还没有明显变化，和最初差不太多。');
-  }
-
-  if (steady.length > 0) {
-    lines.push('');
-    lines.push(`没什么变化的部分：${steady.map((a) => AXIS_LABEL[a]).join('、')}。`);
+    lines.push('你的性情是被你和这个人之间发生过的事塑造出来的，目前还没有明显变化。');
   }
 
   lines.push('');
-  lines.push(
-    '这些是倾向，不是戏服。让它们体现在你说多少、多快接话、主动讲什么，'
-      + '而不是直接说出来。永远不要描述自己的性格，也不要提这些设定。',
-  );
+  if (role) {
+    // 有角色设定时换一套说法：原句"不是戏服"是为纯数值漂变设计的，
+    // 配上具体人物设定反而像在暗示"别当真"。
+    lines.push(
+      '上面说的就是你，不是在扮演谁。别自我介绍，别解释自己的人设，'
+        + '也别提这些设定 —— 直接照这个方式说话就行。',
+    );
+  } else {
+    lines.push(
+      '这些是倾向，不是戏服。让它们体现在你说多少、多快接话、主动讲什么，'
+        + '而不是直接说出来。永远不要描述自己的性格，也不要提这些设定。',
+    );
+  }
 
   const text = lines.join('\n');
   if (text.length <= maxChars) return text;
 
-  // 超预算时**优先保留行为禁令**，再截变化列表。
+  // 超预算时的取舍顺序：
+  //   1. 身份行 + 角色设定 —— 没有这些，模型不知道"用什么姿态说话"
+  //   2. 结尾落地指令 —— 防止把人格表演成漫画
+  //   3. "相比从前"的变化条目 —— 最可牺牲的
   //
-  // 尾部截断会先砍掉最后那句"永远不要描述自己的性格" ——
-  // 而那恰恰是防止模型把人格表演成漫画的关键。
-  // 宁可少说两条"相比从前"，也不能丢掉这条约束。
-  const SAFETY = '这些是倾向，不是戏服。让它们体现在你说多少、多快接话、主动讲什么，'
+  // 早先的实现只保留 `- ` 开头的行，角色设定被整段砍掉，小预算下模型
+  // 只剩一句"别自我介绍"，等于什么都没说。
+  const SAFETY_ROLE = '上面说的就是你，不是在扮演谁。别自我介绍，别解释自己的人设，'
+    + '也别提这些设定 —— 直接照这个方式说话就行。';
+  const SAFETY_PLAIN = '这些是倾向，不是戏服。让它们体现在你说多少、多快接话、主动讲什么，'
     + '而不是直接说出来。永远不要描述自己的性格，也不要提这些设定。';
+  const SAFETY = role ? SAFETY_ROLE : SAFETY_PLAIN;
 
-  // 保留：身份行 + 尽可能多的变化条目 + 安全指令
-  const head = [];
-  const body = [];
+  // 按行切分：身份行 / 角色段 / 变化条目 / 其它
+  const nameLine = lines.find((l) => l.startsWith('你是') || l.startsWith('你正在和')) ?? '';
+  const roleLines = [];
+  const changeLines = [];
   for (const line of lines) {
-    if (line.startsWith('你是') || line.startsWith('你正在和')) head.push(line);
-    else if (line.startsWith('- ')) body.push(line);
+    if (line === nameLine) continue;
+    if (line.startsWith('- ')) changeLines.push(line);
+    else if (line.trim().length > 0 && !line.startsWith('和从前的自己相比')
+             && !line.startsWith('没什么变化的部分')) roleLines.push(line);
   }
 
-  const fixed = [...head, '', '和从前的自己相比：'];
-  const tail = ['', SAFETY];
-  const budget = maxChars - fixed.join('\n').length - tail.join('\n').length;
-
-  // 按预算装变化条目
-  const kept = [];
-  let used = 0;
-  for (const line of body) {
-    if (used + line.length + 1 > budget) break;
-    kept.push(line);
-    used += line.length + 1;
+  // 第一优先：身份 + 角色 + 指令
+  const essential = [nameLine, '', ...roleLines, '', SAFETY].join('\n');
+  if (essential.length <= maxChars) {
+    // 有剩余空间才加变化条目
+    const room = maxChars - essential.length - 20;
+    if (changeLines.length === 0 || room < 20) return essential;
+    const kept = [];
+    let used = 0;
+    for (const line of changeLines) {
+      if (used + line.length + 1 > room) break;
+      kept.push(line);
+      used += line.length + 1;
+    }
+    if (kept.length === 0) return essential;
+    return [nameLine, '', ...roleLines, '', '和从前的自己相比：', ...kept, '', SAFETY].join('\n');
   }
 
-  if (kept.length === 0) {
-    // 预算极小：只留身份 + 安全指令（安全指令永远不被牺牲）
-    const minimal = [...head, '', SAFETY].join('\n');
-    return minimal.length <= maxChars ? minimal : SAFETY.slice(0, maxChars);
-  }
-  return [...fixed, ...kept, ...tail].join('\n');
+  // 放不下：压角色文本，但保身份与指令
+  const room = maxChars - nameLine.length - SAFETY.length - 4;
+  const roleText = roleLines.join('\n');
+  if (room <= 0) return `${nameLine}\n\n${SAFETY}`.slice(0, Math.max(maxChars, SAFETY.length + nameLine.length + 2));
+  return `${nameLine}\n\n${roleText.slice(0, room)}\n\n${SAFETY}`;
 }
-
 // ---------------------------------------------------------------------------
 // 工具
 // ---------------------------------------------------------------------------

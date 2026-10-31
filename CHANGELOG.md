@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.7.0
+
+Roles. The persona used to have nothing to say about itself, which is why prompt
+edits did not take.
+
+### The actual problem
+
+`renderPersona` emitted exactly one fixed template. Measured in a live session:
+
+```
+system prompt total:   8113 chars
+persona section:        122 chars  (1.5%)
+persona content:       "你的性情还没有明显变化" / "没什么变化的部分：温度、情绪起伏…"
+```
+
+So the model was told *it has no character*, wedged between "You are an AI agent"
+and "You are a coding agent", with no anchors and no history. Whatever the user
+wrote as a prompt, the injected text said otherwise.
+
+### Roles
+
+`state.identity.role` is now an editable block injected every turn. Empty role
+falls back to the old behaviour. Ships with a default: a thirteen-year-old
+daughter — has her own thoughts, a bit proud, admires and leans on her father,
+can actually help with things.
+
+Written as concrete behaviour ("被夸时装不在意但记很久") rather than adjectives
+("骄傲"), because labels invite caricature.
+
+Two rendering fixes came with it:
+
+- **"你的性情还没有明显变化" is suppressed when a role exists.** Punchline: it
+  contradicts the character block right above it, and the cheapest reading for the
+  model is "that description is just setup, don't act on it".
+- **the closing instruction is reworded.** "不是戏服" was written for pure numeric
+  drift; with a concrete character it reads as "don't take this seriously" — now
+  it says the opposite.
+
+Verified A/B against the same question:
+
+| | 我今天有点累 |
+|---|---|
+| no role | （凑近一点）累了呀……是工作上的事，还是没睡好？ |
+| role | 那就别撑着了。饭吃了没？没吃的话我去看看有什么。 |
+
+and on a technical question, the no-role reply came out as a six-heading
+document while the role reply stayed conversational.
+
+Role is fully replaceable — the panel has a textarea; the default is only a
+starting point.
+
+### Truncation
+
+The old over-budget path only kept lines starting with `- ` (the "compared to
+before" entries), so a small `maxChars` silently dropped the entire role block,
+leaving the model with nothing but "don't introduce yourself". Rewritten to
+allocate in priority order: identity + role first, then the closing instruction,
+then change entries. At `maxChars` 120 both role and instruction now survive.
+
+e2e 58 -> **67 assertions**.
+
 ## 0.6.3
 
 Memory anchors gained a runtime switch, and the panel now warns about running

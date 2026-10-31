@@ -171,9 +171,20 @@ console.log();
 console.log('=== 表达层 ===');
 {
   const s = initialState();
+
+  // v0.7 起默认带角色设定：渲染里**不再出现**"性情还没有明显变化"
+  // —— 那句话会抵消人物设定（等于告诉模型"你没有性格"）。
   const base = renderPersona(s, { name: '小雨' });
-  check('基线渲染不含变化条目', base.includes('还没有明显变化'));
-  check('含禁止自我描述指令', base.includes('永远不要描述自己的性格'));
+  check('有角色时不含"还没有明显变化"', !base.includes('还没有明显变化'));
+  check('含默认角色设定', base.includes('十三四岁'));
+  check('含禁止自我描述指令', base.includes('别自我介绍'));
+
+  // 无角色时才走旧路径
+  const noRole = initialState();
+  noRole.identity = { name: '小雨', userName: '', role: '' };
+  const plain = renderPersona(noRole, { name: '小雨' });
+  check('无角色时保留旧文案', plain.includes('还没有明显变化'));
+  check('无角色时用旧禁令', plain.includes('永远不要描述自己的性格'));
 
   // 构造一个明显变化的人格
   s.traits = { warmth: 0.21, volatility: 0.45, guardedness: 0.79, playfulness: 0.27, dependence: 0.21 };

@@ -162,6 +162,8 @@ window.__ModuleLoader__.load({
       // 身份编辑：本地草稿，保存前不影响真实状态
       const [draftName, setDraftName] = React.useState(null);
       const [draftUserName, setDraftUserName] = React.useState(null);
+      // 角色设定：多行文本，单独草稿
+      const [draftRole, setDraftRole] = React.useState(null);
 
       const load = React.useCallback(async () => {
         try {
@@ -200,6 +202,7 @@ window.__ModuleLoader__.load({
         const patch = {};
         if (draftName !== null) patch.name = draftName;
         if (draftUserName !== null) patch.userName = draftUserName;
+        if (draftRole !== null) patch.role = draftRole;
         if (Object.keys(patch).length === 0) return;
         try {
           const r = await callRpc('identity', patch);
@@ -207,6 +210,7 @@ window.__ModuleLoader__.load({
           setData((cur) => ({ ...cur, identity: r.value.identity }));
           setDraftName(null);
           setDraftUserName(null);
+          setDraftRole(null);
           await load();
           await loadLedger(showAll ? 200 : 10);
         } catch (err) {
@@ -291,12 +295,31 @@ window.__ModuleLoader__.load({
           onKeyDown: (e) => { if (e.key === 'Enter') void saveIdentity(); },
         }),
       ]));
-      if (draftName !== null || draftUserName !== null) {
+      // 角色设定：决定"用什么姿态说话"，是语气问题的根子
+      children.push(h('div', { key: 'id-role-l', style: { ...C.sub, marginTop: 10 } },
+        '角色设定 —— 它是什么样的人、怎么说话。这段会每轮注入，'
+          + '比一次性提示词有效得多。'));
+      children.push(h('textarea', {
+        key: 'id-role',
+        style: {
+          width: '100%', minHeight: 140, padding: '8px 10px', fontSize: 11,
+          lineHeight: '18px', borderRadius: 6, boxSizing: 'border-box',
+          border: '1px solid rgba(127,127,127,0.28)',
+          background: 'rgba(127,127,127,0.04)', color: 'inherit',
+          fontFamily: 'inherit', resize: 'vertical',
+        },
+        value: draftRole !== null ? draftRole : (ident.role || ''),
+        placeholder: '例如：你是……\n说话方式：……',
+        maxLength: 3000,
+        onChange: (e) => setDraftRole(e.target.value),
+      }));
+
+      if (draftName !== null || draftUserName !== null || draftRole !== null) {
         children.push(h('div', { key: 'id-act', style: C.row }, [
           h('button', { key: 's', style: C.btn, onClick: () => void saveIdentity() }, '保存'),
           h('button', {
             key: 'c', style: C.btn,
-            onClick: () => { setDraftName(null); setDraftUserName(null); },
+            onClick: () => { setDraftName(null); setDraftUserName(null); setDraftRole(null); },
           }, '取消'),
         ]));
       }

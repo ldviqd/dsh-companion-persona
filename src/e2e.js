@@ -557,7 +557,59 @@ console.log('=== 15. 锚点状态机 ===');
 }
 
 // ---------------------------------------------------------------------------
-// 15. 安全指令不能被截断
+// 15. 角色设定（v0.7）
+//
+//     之前 renderPersona 只输出"性情还没有明显变化"，等于告诉模型"你没有性格"，
+//     提示词怎么写都不生效。角色设定提供可编辑的"底子"。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 15. 角色设定 ===');
+{
+  const s = initialState();
+  check('默认带角色设定', (s.identity?.role ?? '').length > 0, `${(s.identity?.role ?? '').length} 字`);
+
+  s.identity.name = '鲸鲸';
+  s.identity.userName = '爸爸';
+  const out = renderPersona(s, { maxChars: 2000 });
+  check('渲染含角色身份', out.includes('女儿'));
+  check('渲染含说话方式', out.includes('说话方式'));
+  check('有角色时不出现"还没有明显变化"', !out.includes('还没有明显变化'),
+    '这句话会抵消人物设定');
+  check('有角色时不重复称呼', !out.includes('你正在和爸爸相处'),
+    '角色文本已交代关系');
+
+  // 角色可替换
+  const custom = initialState();
+  custom.identity = { name: '老陈', userName: '', role: '你是个老师傅，话不多。' };
+  const customOut = renderPersona(custom, { maxChars: 2000 });
+  check('角色可完全替换', customOut.includes('老师傅') && !customOut.includes('十三四岁'));
+
+  // 无角色时保持旧行为
+  const noRole = initialState();
+  noRole.identity = { name: '小雨', userName: '', role: '' };
+  check('无角色时回到旧文案', renderPersona(noRole).includes('还没有明显变化'));
+
+  // 长角色不应挤掉安全指令
+  const longRole = initialState();
+  longRole.identity.role = '你是一个很长的角色设定。'.repeat(40);
+  const truncated = renderPersona(longRole, { maxChars: 600 });
+  check('长角色下仍保留落地指令（不被截断）',
+    truncated.includes('别自我介绍') || truncated.includes('永远不要描述'), `${truncated.length} 字`);
+
+  // 小预算下角色不能被整段砍掉（早期实现的 bug）
+  let smallOk = 0;
+  for (const mc of [400, 300, 200, 120]) {
+    const o = renderPersona(s, { maxChars: mc });
+    const hasRole = o.includes('女儿') || o.includes('心思');
+    const hasSafety = o.includes('别自我介绍') || o.includes('永远不要描述');
+    if (hasRole && hasSafety) smallOk++;
+  }
+  check('小预算下角色与指令都保留', smallOk === 4, `${smallOk}/4`);
+}
+
+// ---------------------------------------------------------------------------
+// 16. 安全指令不能被截断
 // ---------------------------------------------------------------------------
 
 console.log();

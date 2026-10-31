@@ -23,6 +23,7 @@ import {
   renderPersona,
   snapshot,
   describeChanges,
+  DEFAULT_ROLE,
   evaluateExclusion,
   normalizeExclusions,
   TRAIT_AXES,
@@ -114,11 +115,15 @@ async function loadState(file) {
       parsed.exclusions = normalizeExclusions(parsed.exclusions);
       // 兼容旧状态：补齐身份；首次运行时用 config.name 作为初始值
       if (parsed.identity === undefined || parsed.identity === null) {
-        parsed.identity = { name: '', userName: '' };
+        parsed.identity = { name: '', userName: '', role: DEFAULT_ROLE };
       } else {
         parsed.identity = {
           name: String(parsed.identity.name ?? ''),
           userName: String(parsed.identity.userName ?? ''),
+          // 旧状态没有 role → 补默认角色（否则注入的还是"你没有性格"那句）
+          role: typeof parsed.identity.role === 'string'
+            ? parsed.identity.role
+            : DEFAULT_ROLE,
         };
       }
       return parsed;
@@ -781,6 +786,11 @@ export async function apply(ctx, config) {
       if (payload?.userName !== undefined) {
         const v = String(payload.userName).trim().slice(0, 40);
         if (v !== before.userName) { next.userName = v; touched = true; }
+      }
+      if (payload?.role !== undefined) {
+        // 角色设定：允许较长文本，但设上限避免把整个 profile 塞进来
+        const v = String(payload.role).slice(0, 3000);
+        if (v !== before.role) { next.role = v; touched = true; }
       }
       if (!touched) return { ok: true, value: { identity: before, changed: false } };
 

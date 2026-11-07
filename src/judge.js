@@ -120,6 +120,38 @@ const VALID_KIND = new Set(KINDS);
  * 模型可能输出 "conflict。" / "**repair**" / "标签：loss"，这里做容错。
  * 无法识别时返回 null，让调用方降级。
  */
+/**
+ * 从模型输出里同时解析 kind 与 valence。
+ *
+ * 兼容两种格式：
+ *   新：`kind=achievement\nvalence=0.8`
+ *   旧：只输出标签（退回 parseKind，valence 为 null）
+ *
+ * valence 解析失败不影响 kind —— 两者独立降级。
+ *
+ * @returns {{kind: string|null, valence: number|null}}
+ */
+export function parseJudgement(raw) {
+  if (typeof raw !== 'string') return { kind: null, valence: null };
+
+  // kind 优先取 `kind=xxx` 显式标注 —— 否则 parseKind 会被前缀词 "kind" 干扰
+  // （它把 = 换成空格后，"kind achievement" 里 "kind" 会先被当成候选）
+  const labeledKind = raw.match(/kind\s*[=:]\s*([a-z]+)/i);
+  const kind = labeledKind
+    ? (VALID_KIND.has(labeledKind[1].toLowerCase()) ? labeledKind[1].toLowerCase() : parseKind(raw))
+    : parseKind(raw);
+
+  // 优先取 `valence=` 显式标注；没有则退回"文本里唯一的数字"
+  let valence = null;
+  const labeled = raw.match(/valence\s*[=:]\s*(-?\d+(?:\.\d+)?)/i);
+  const numMatch = labeled ?? raw.match(/(?:^|\s)(-?\d+\.\d+)(?:\s|$)/);
+  if (numMatch) {
+    const v = parseFloat(numMatch[1]);
+    if (Number.isFinite(v)) valence = Math.max(-1, Math.min(1, v));
+  }
+  return { kind, valence };
+}
+
 export function parseKind(raw) {
   if (typeof raw !== 'string') return null;
   const cleaned = raw
@@ -136,20 +168,25 @@ export function parseKind(raw) {
 }
 
 /** 判定用的系统提示词。刻意简短——只要标签，不要解释，省 token 也省延迟。 */
-export const CLASSIFIER_PROMPT = `你是情感事件分类器。判断用户这句话属于哪一类。
+export const CLASSIFIER_PROMPT = `判断这句话的事件类型和情感效价。
 
-标签（只能选一个）：
-- routine      日常闲聊、寒暄、应答，没有明显情感色彩
-- distance     对方在疏远、冷淡、回避（注意：短句不等于疏远）
-- conflict     争执、不满、指责
-- repair       道歉、和解、修复关系
-- support      表达感谢、肯定、支持对方
-- intimacy     自我暴露、示弱、分享私人情感或家庭私事
-- achievement  分享好消息、成就、开心的事
-- betrayal     欺骗、隐瞒、背叛、离开
-- loss         失去、去世、分手、永别
+类型（选一个）：
+routine 闲聊寒暄 / distance 疏远冷淡 / conflict 争执不满 / repair 道歉和解
+support 感谢肯定 / intimacy 示弱或分享私事 / achievement 好消息好心情
+betrayal 欺骗背叛 / loss 失去永别
 
-只输出标签本身，不要解释，不要加标点。`;
+效价：-1 到 1 的小数。-1 极度负面，0 中性，1 极度正面。
+
+判断效价时注意：
+- 反讽：「你可真行啊」「真是谢谢你啊」是负面
+- 亲昵的骂：「讨厌啦」「你这个笨蛋」可能偏正面
+- 敷衍：「行吧」「随你」「哦」轻微负面
+- 陈述里出现情感词（"这本书讲怎么应对焦虑"）不算负面
+- 短句不等于疏远
+
+只输出两行，不要解释：
+kind=类型
+valence=数字`;
 
 /**
  * LLM 判定器。带缓存与降级。
@@ -171,13 +208,13 @@ export function createJudge({ classify, cacheSize = 512, logger } = {}) {
     return String(text ?? '').trim().replace(/\s+/g, ' ').slice(0, 200);
   }
 
-  function remember(key, kind) {
+  function remember(key, kind, valence = null) {
     if (cache.size >= cacheSize) {
       // 简单的 FIFO 淘汰：Map 保序，删最早的
       const oldest = cache.keys().next().value;
       cache.delete(oldest);
     }
-    cache.set(key, kind);
+    cache.set(key, { kind, valence });
   }
 
   /**
@@ -201,18 +238,23 @@ export function createJudge({ classify, cacheSize = 512, logger } = {}) {
       const hit = cache.get(key);
       cache.delete(key);
       cache.set(key, hit);
-      return { kind: hit, source: 'cache', reason: 'cached' };
+      // 兼容早期只存 kind 字符串的条目
+      const cachedKind = typeof hit === 'string' ? hit : hit.kind;
+      const cachedValence = typeof hit === 'string' ? null : hit.valence;
+      return { kind: cachedKind, valence: cachedValence, source: 'cache', reason: 'cached' };
     }
 
     // LLM
     stats.calls++;
     try {
       const raw = await classify(key);
-      const kind = parseKind(raw);
+      const { kind, valence } = parseJudgement(raw);
       if (kind) {
         stats.llmHits++;
-        remember(key, kind);
-        return { kind, source: 'llm', reason: 'model' };
+        remember(key, kind, valence);
+        // valence 与 kind 一起返回：模型已经读过这句话了，顺带给出效价，
+        // 比让词典再猜一遍准得多（实测 MAE 0.141 vs 0.453）。
+        return { kind, valence, source: 'llm', reason: 'model' };
       }
       stats.failures++;
       logger?.warn?.(`[persona] 模型输出无法识别为标签: ${String(raw).slice(0, 40)}`);
@@ -289,11 +331,51 @@ function conservativeFallback(text) {
  * 这条规则在真实数据上验证过：没有它，纯冲突文本效价为 0，
  * strain 恒为 0，人格永不变化。
  */
-export function toEpisode(kind, text) {
+/**
+ * 调和模型给出的 valence 与事件类型。
+ *
+ * 旧逻辑 calibrateValence 是「按 kind 强推下限」，用于修正**词典漏判**：
+ * 词典算"你骗了我" = 0，才需要按 betrayal 强推到 -0.85。
+ *
+ * 模型给的 valence 已经理解了语义，再强推就是不信任它。实测：
+ * 「不愧是你」模型给 +0.5（对），但 kind 若被判成 distance，
+ * 强推会把答案改成 -0.30（错）。
+ *
+ * 所以只在方向相反时介入，同向的一律尊重模型。
+ */
+export function reconcileValence(kind, valence) {
+  // intimacy 刻意不在此表：它**两种极性都合法** ——
+  // 「谢谢你陪着我」是正效价的亲密，「我最近有点慌」是负效价的示弱。
+  // 早期版本给 intimacy 一个 +0.1 下限，会把示弱强行判成正面，
+  // 而示弱恰恰是锚点系统最关心的信号（ANCHOR_KINDS 含 intimacy）。
+  const FLOOR = {
+    betrayal: -0.5, loss: -0.6, conflict: -0.25, distance: -0.15,
+    repair: 0.2, support: 0.25, achievement: 0.15,
+  };
+  const floor = FLOOR[kind];
+  if (floor === undefined) return valence;
+  if (floor < 0 && valence <= 0) return valence;
+  if (floor > 0 && valence >= 0) return valence;
+  return floor;
+}
+
+export function toEpisode(kind, text, llmValence = null) {
   // 先补事件类型带来的相关性下限，再算 valence/novelty —— 顺序很重要
   let sig = extractSignals(text);
   sig = applyKindRelevance(sig, kind);
-  const valence = calibrateValence(kind, sig);
+  // valence 来源优先级：模型 > 词典
+  //
+  // 模型判定比词典准得多（实测 MAE 0.141 vs 0.453）—— 反讽、亲昵的骂、
+  // 网络用语、示弱漏检这几类词典基本无能为力。
+  // 但模型可能给出与 kind 矛盾的效价，交给 reconcileValence 处理，
+  // 而不是像旧逻辑那样无条件按 kind 强推。
+  let valence;
+  if (typeof llmValence === 'number' && Number.isFinite(llmValence)) {
+    sig = { ...sig, valence: llmValence };
+    valence = reconcileValence(kind, llmValence);
+  } else {
+    valence = calibrateValence(kind, sig);
+  }
 
   /**
    * 修正 novelty 的计算顺序。

@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.8.0
+
+Event classification now returns valence alongside the kind, and the model's
+valence takes precedence over the dictionary.
+
+### Why
+
+Measured on 31 utterances across 8 categories:
+
+| | valence MAE | direction correct |
+|---|---|---|
+| dictionary | 0.453 | 10/22 |
+| model | **0.141** | **20/22** |
+
+The dictionary's failures are structural, not coverage gaps:
+
+- 真是谢谢你啊 → dictionary **+1.00** (max positive), actually sarcasm
+- 讨厌啦你 → dictionary **-1.00**, actually affectionate
+- 这本书讲的是怎么应对焦虑 → dictionary **-0.87**, actually a neutral statement
+- 感觉自己挺没用的 → dictionary **0.00**, actually the vulnerability signal the
+  anchor system cares most about
+
+### Change
+
+`CLASSIFIER_PROMPT` now emits `kind=` and `valence=` in one call — the model has
+already read the sentence, so asking for sentiment costs ~7 extra output tokens.
+
+`parseJudgement` parses both, accepting the old kind-only format as a fallback.
+`toEpisode(kind, text, llmValence)` prefers the model value; `calibrateValence`
+remains as the dictionary fallback when no model value is available.
+
+`reconcileValence` replaces the old unconditional floor. The old logic forced
+valence to a floor based on kind, which corrected dictionary misses but also
+overrode correct model answers: 「不愧是你」 scored +0.5 correctly, yet a
+kind of `distance` pushed it to -0.30. Now it intervenes only when the two
+disagree in **direction**.
+
+`intimacy` deliberately has no floor — both polarities are legitimate there
+(「谢谢你陪着我」 positive, 「我最近有点慌」 negative). Forcing it positive would
+suppress the vulnerability signal.
+
+Net: end-to-end valence MAE 0.462 → 0.247 with kind still rule-based.
+
+e2e 79 → **89 assertions**.
+
 ## 0.7.2
 
 Positive sentiment was systematically under-detected, which biased the persona

@@ -458,7 +458,9 @@ export async function apply(ctx, config) {
         state = restPersona(state, rounds);
       }
 
-      const episode = toEpisode(kind, text);
+      // 模型已读过这句话，顺带给出的 valence 比词典准得多，
+      // 传进去让 toEpisode 优先采用（reconcileValence 处理与 kind 的矛盾）。
+      const episode = toEpisode(kind, text, verdict.valence ?? null);
       const signals = extractSignals(text);
 
       // ---- 记忆锚点 ----

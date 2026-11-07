@@ -20,7 +20,7 @@ import {
   appraise, initialState, step, describeChanges, renderPersona,
   evaluateExclusion, TRAIT_AXES,
 } from './persona-core.js';
-import { ruleFilter, parseKind, toEpisode, createJudge, KINDS } from './judge.js';
+import { ruleFilter, parseKind, toEpisode, createJudge, KINDS, reconcileValence } from './judge.js';
 import { extractSignals, inferEventKind } from './signals.js';
 import {
   maybeCreateAnchor, selectRecall, markRecalled, renderRecall,
@@ -651,6 +651,53 @@ console.log('=== 14c. 正负效价对称 ===');
     if (extractSignals(t).valence > 0.05) falsePos++;
   }
   check('单字不误伤（勉强/强制/牛角尖）', falsePos === 0, `${falsePos} 例误判`);
+}
+
+// ---------------------------------------------------------------------------
+// 14d. 模型效价优先（v0.8）
+//
+//     toEpisode 现在可以接收模型给的 valence。reconcileValence 只在
+//     **方向相反**时介入，同向的一律尊重模型 —— 旧逻辑无条件按 kind
+//     强推下限，会把模型判对的答案改成错的。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14d. 模型效价优先 ===');
+{
+  // 同向：尊重模型，不推
+  check('intimacy + 负效价（示弱）保持原值',
+    reconcileValence('intimacy', -0.55) === -0.55);
+  check('achievement + 正效价保持原值',
+    reconcileValence('achievement', 0.85) === 0.85);
+  check('betrayal + 强负效价保持原值',
+    reconcileValence('betrayal', -0.85) === -0.85);
+
+  // 反向：信 kind，拉回合理区间
+  check('betrayal + 正效价 → 校正为负',
+    reconcileValence('betrayal', 0.5) === -0.5);
+  check('achievement + 负效价 → 校正为正',
+    reconcileValence('achievement', -0.4) === 0.15);
+
+  // routine 不干预
+  check('routine 不干预效价', reconcileValence('routine', -0.42) === -0.42);
+
+  // 关键回归：若 kind 判成 distance，模型给的正效价会被拉回（这是预期行为）
+  check('distance 会压制模型的正效价',
+    reconcileValence('distance', 0.5) === -0.15);
+
+  // toEpisode 有模型 valence 时优先采用
+  const txt = '鲸鲸在记忆力这方面真棒，比我厉害多了。';
+  const withLlm = toEpisode('achievement', txt, 0.85);
+  const withoutLlm = toEpisode('achievement', txt, null);
+  check('传入模型 valence 时采用它', Math.abs(withLlm.valence - 0.85) < 0.01,
+    `${withLlm.valence}`);
+  check('未传时回落到词典', Math.abs(withoutLlm.valence - 1.0) < 0.05,
+    `${withoutLlm.valence}`);
+
+  // 反讽：「真是谢谢你啊」词典给 +1.0，模型给 -0.6
+  const sarcasm = '真是谢谢你啊';
+  const epS = toEpisode('distance', sarcasm, -0.6);
+  check('反讽采用模型效价（不被词典带偏）', epS.valence <= 0, `${epS.valence}`);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.7.2
+
+Positive sentiment was systematically under-detected, which biased the persona
+toward gloom.
+
+### Measurement
+
+18 common praise phrasings, before the fix:
+
+| | detected |
+|---|---|
+| praise | **4 / 18 (22%)** |
+| criticism | 10 / 10 (100%) |
+
+Missing entirely: 真棒 / 厉害 / 了不起 / 优秀 / 佩服 / 靠谱 / 贴心, and every
+"比我厉害多了"-style comparison. The dictionary had 很棒 and 赞 but not the forms
+people actually use.
+
+The asymmetry is not a cosmetic gap. Valence drives `inferEventKind`, which drives
+`BOND_KINDS`; a turn that should have been `achievement` fell through to `routine`
+and contributed nothing. Over months, warmth only ever got pulled down.
+
+### Fix
+
+Added ~40 two-or-more-character praise terms. Deliberately no bare 强 / 牛 —
+tested against 勉强, 强制, 牛角尖, 强人所难, all still neutral.
+
+Verified: 10/10 praise, 8/8 criticism, and 「鲸鲸在记忆力这方面真棒」 now classifies
+as `achievement` instead of `routine`.
+
+e2e 74 → **79 assertions**, including the asymmetry itself and the single-character
+false-positive guards.
+
 ## 0.7.1
 
 QQ messages now participate in persona evolution, and their envelope no longer

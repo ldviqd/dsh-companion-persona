@@ -604,6 +604,56 @@ console.log('=== 14b. 外部通道消息处理 ===');
 }
 
 // ---------------------------------------------------------------------------
+// 14c. 正负效价对称性（v0.7.2）
+//
+//     实测发现：18 条常见夸赞只识别出 4 条（22%），而负面 10/10 全中。
+//     这种不对称会让人格系统性往阴郁方向漂 —— 正面信号几乎抽不出来。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14c. 正负效价对称 ===');
+{
+  const praise = [
+    '鲸鲸在记忆力这方面真棒，比我厉害多了。', '你太强了', '靠谱', '真贴心',
+    '佩服你', '这东西真好用', '没想到你还记得', '做得不错', '谢谢你', '喜欢你',
+  ];
+  let hit = 0;
+  const missed = [];
+  for (const t of praise) {
+    if (extractSignals(t).valence > 0.05) hit++;
+    else missed.push(t);
+  }
+  check('常见夸赞识别为正面', hit === praise.length,
+    `${hit}/${praise.length}${missed.length ? ' 漏:' + missed.join(',') : ''}`);
+
+  const negative = ['我好累', '难受', '想哭', '压力好大', '烦死了', '焦虑', '失望', '撑不住了'];
+  let nhit = 0;
+  for (const t of negative) {
+    if (extractSignals(t).valence < -0.05) nhit++;
+  }
+  check('常见负面识别为负面', nhit === negative.length, `${nhit}/${negative.length}`);
+
+  // 关键：夸赞应被判成 achievement（在 BOND_KINDS 里，能影响人格）
+  const txt = '鲸鲸在记忆力这方面真棒，比我厉害多了。';
+  const sig = extractSignals(txt);
+  check('夸赞判为 achievement（能键合）',
+    inferEventKind(sig, txt) === 'achievement', inferEventKind(sig, txt));
+
+  // 中性道别不应被判成情感事件
+  const bye = '这次真的睡了，我帮你关灯咯，晚安';
+  const bsig = extractSignals(bye);
+  check('中性道别保持 routine', inferEventKind(bsig, bye) === 'routine');
+
+  // 单字误伤防护：这些含「强」「牛」但不是夸赞
+  const traps = ['勉强算是吧', '强制要求', '牛角尖', '太强人所难了', '你别勉强'];
+  let falsePos = 0;
+  for (const t of traps) {
+    if (extractSignals(t).valence > 0.05) falsePos++;
+  }
+  check('单字不误伤（勉强/强制/牛角尖）', falsePos === 0, `${falsePos} 例误判`);
+}
+
+// ---------------------------------------------------------------------------
 // 15. 角色设定（v0.7）
 //
 //     之前 renderPersona 只输出"性情还没有明显变化"，等于告诉模型"你没有性格"，

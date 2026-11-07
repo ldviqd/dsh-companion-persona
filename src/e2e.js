@@ -21,7 +21,7 @@ import {
   evaluateExclusion, TRAIT_AXES,
 } from './persona-core.js';
 import { ruleFilter, parseKind, toEpisode, createJudge, KINDS } from './judge.js';
-import { extractSignals } from './signals.js';
+import { extractSignals, inferEventKind } from './signals.js';
 import {
   maybeCreateAnchor, selectRecall, markRecalled, renderRecall,
   processResolution, applyFade, reviveIfMentioned,
@@ -554,6 +554,53 @@ console.log('=== 15. 锚点状态机 ===');
   const revived = reviveIfMentioned([f], '我妈最近身体怎么样');
   check('淡出后提及可复活', f.state !== 'faded', f.state);
   check('复活返回被复活的锚点', revived.length === 1, `${revived.length} 条`);
+}
+
+// ---------------------------------------------------------------------------
+// 14b. 外部通道消息（v0.7.1）
+//
+//     dsh-onebot 把 QQ 正文包在 <user_message qq="..." nickname="..."> 里。
+//     这些标签会污染信号抽取（confidence 0.41→1.00），必须剥掉。
+//     同时 source.kind 是 'plugin:dsh-onebot'，不是 'user'。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14b. 外部通道消息处理 ===');
+{
+  // 复制插件的剥离逻辑（保持与 index.js 一致）
+  const TAGS = ['user_message', 'other_message', 'message', 'quote', 'forward'];
+  const strip = (t) => {
+    let o = String(t ?? '');
+    for (const tag of TAGS) o = o.replace(new RegExp(`</?${tag}(\\s[^>]*)?>`, 'gi'), '');
+    return o.trim();
+  };
+
+  const tagged = '<user_message qq="632697661" nickname="长安">\n晚上好呀鲸鲸\n</user_message>';
+  const bare = '晚上好呀鲸鲸';
+
+  check('剥标签后文本正确', strip(tagged) === bare, JSON.stringify(strip(tagged)));
+
+  const a = extractSignals(strip(tagged));
+  const b = extractSignals(bare);
+  const identical = Object.keys(b).every((k) => Math.abs((a[k] ?? 0) - (b[k] ?? 0)) < 0.001);
+  check('剥标签后信号与裸文本一致', identical);
+
+  // 标签未剥时会污染 confidence —— 这个断言防止未来有人删掉 stripEnvelope
+  const polluted = extractSignals(tagged);
+  check('（对照）未剥标签会污染 confidence',
+    Math.abs(polluted.confidence - b.confidence) > 0.1,
+    `${polluted.confidence.toFixed(2)} vs ${b.confidence.toFixed(2)}`);
+
+  // 强信号不受影响（背叛即使在标签里也能识别）
+  const betrayalTagged = '<user_message qq="1" nickname="x">\n你骗了我\n</user_message>';
+  check('背叛信号在标签内仍可识别',
+    inferEventKind(extractSignals(betrayalTagged), betrayalTagged) === 'betrayal');
+
+  // source 白名单
+  const KINDS = new Set(['user', 'plugin:dsh-onebot']);
+  check('白名单含 QQ 通道', KINDS.has('plugin:dsh-onebot'));
+  check('白名单排除 plugin:memory（防污染）', !KINDS.has('plugin:memory'));
+  check('白名单排除裸 plugin', !KINDS.has('plugin'));
 }
 
 // ---------------------------------------------------------------------------

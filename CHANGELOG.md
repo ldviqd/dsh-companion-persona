@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.7.1
+
+QQ messages now participate in persona evolution, and their envelope no longer
+pollutes signal extraction.
+
+### Bug 1: external messages were invisible to the persona
+
+`turn/end` filtered messages with `source.kind === 'user'`. dsh-onebot delivers
+QQ messages as `plugin:dsh-onebot`, so every QQ turn was dropped — the persona had
+not updated since 2026-10-29 while appearing to work fine, because the *injection*
+direction was unaffected.
+
+Fixed with an explicit whitelist rather than a prefix match: `plugin:memory` is
+this plugin's own recall block and must stay excluded, or the persona would learn
+from its own output.
+
+### Bug 2: XML envelope inflated the signals
+
+dsh-onebot wraps message text:
+
+```
+<user_message qq="632697661" nickname="长安">
+晚上好呀鲸鲸
+</user_message>
+```
+
+Those attributes read as content to the signal layer:
+
+| signal | bare | wrapped |
+|---|---|---|
+| novelty | 0.150 | 0.400 |
+| engagement | 0.045 | 0.495 |
+| confidence | 0.410 | **1.000** |
+
+Consequence: a plain greeting classified as `routine` instead of `distance` —
+drift in the wrong direction. Strong signals survived (betrayal still detected),
+so this would have biased the persona slowly and quietly.
+
+`contentToText` now strips envelope tags before anything else sees the text;
+after stripping, signals are byte-identical to the bare string.
+
+e2e 67 → **74 assertions**.
+
 ## 0.7.0
 
 Roles. The persona used to have nothing to say about itself, which is why prompt

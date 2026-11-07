@@ -370,11 +370,23 @@ export async function apply(ctx, config) {
     pendingRecallText = '';
 
     // 只处理真人对话轮次（有 user 消息的）
+    //
+    // 白名单化(2026-11-08)：原判断只认 source.kind === 'user'，
+    // 导致 QQ 通道(dsh-onebot 投递，kind='plugin:dsh-onebot')的消息
+    // **完全不参与人格演化** —— 人格停更了 10 天却看不出来。
+    //
+    // 不能放行全部 plugin:*：宿主会注入 time-context / runtime-context /
+    // skill-catalog 等样板，以及本插件自己产生的 plugin:memory 召回块，
+    // 那些都不是"人对它说的话"。
+    const USERISH_SOURCE_KINDS = new Set([
+      'user',
+      'plugin:dsh-onebot',
+    ]);
     let userTexts;
     try {
       const messages = session.deriveMessages?.() ?? [];
       userTexts = messages
-        .filter((m) => m?.role === 'user' && m?.source?.kind === 'user')
+        .filter((m) => m?.role === 'user' && USERISH_SOURCE_KINDS.has(m?.source?.kind))
         .map((m) => contentToText(m.content))
         .filter((t) => t.length > 0);
     } catch {
@@ -1000,14 +1012,39 @@ function describeChangesForPanel(state) {
 }
 
 /** 从 Block[] 提取纯文本 */
+/**
+ * 从消息内容里取纯文本。
+ *
+ * 外部通道会把正文包在 XML 标签里，例如 dsh-onebot 的：
+ *   <user_message qq="632697661" nickname="长安">晚上好呀鲸鲸</user_message>
+ *
+ * 这些标签必须剥掉，否则会污染信号抽取（实测）：
+ *   novelty     0.150 → 0.400   （"qq=数字" 被当成新信息）
+ *   engagement  0.045 → 0.495
+ *   confidence  0.410 → 1.000   （结构化属性被当成"表述明确"）
+ * 结果是一条普通问候被判成 routine 而不是 distance —— 人格朝错误方向漂。
+ */
+const ENVELOPE_TAGS = [
+  'user_message', 'other_message', 'message', 'quote', 'forward',
+];
+
+function stripEnvelope(text) {
+  let out = String(text ?? '');
+  for (const tag of ENVELOPE_TAGS) {
+    const re = new RegExp(`</?${tag}(\\s[^>]*)?>`, 'gi');
+    out = out.replace(re, '');
+  }
+  return out.trim();
+}
+
 function contentToText(content) {
-  if (typeof content === 'string') return content.trim();
+  if (typeof content === 'string') return stripEnvelope(content);
   if (!Array.isArray(content)) return '';
   let out = '';
   for (const block of content) {
     if (block?.type === 'text' && typeof block.text === 'string') out += block.text;
   }
-  return out.trim();
+  return stripEnvelope(out);
 }
 
 function round(v) { return Math.round(v * 10000) / 10000; }

@@ -85,17 +85,24 @@ function normalizeForSilent(text) {
  */
 export function ruleFilter(text) {
   const s = String(text ?? '').trim();
-  if (s.length === 0) return { kind: 'routine', reason: 'empty' };
+  if (s.length === 0) return { kind: 'routine', reason: 'empty', shortCircuit: true };
 
   // 1) 高置信度词
+  //
+  //    v0.9 起这些**不再短路**：shortCircuit=false 表示"这是规则的猜测，
+  //    模型可用时应由模型复核"。调用方据此决定是否采纳。
+  //    保留返回值是为了降级路径（模型不可用时）仍能用。
   for (const { kind, re } of CONFIDENT_RULES) {
-    if (re.test(s)) return { kind, reason: `rule:${kind}` };
+    if (re.test(s)) return { kind, reason: `rule:${kind}`, shortCircuit: false };
   }
 
   // 2) 纯应声词 → routine（不是 distance！）
+  //
+  //    这是唯一允许短路的情况：单字应答没有事件信息，
+  //    调模型只会引入随机性（"嗯"可能被判成 distance）。
   const norm = normalizeForSilent(s);
   if (norm.length > 0 && norm.length <= 4 && SILENT_WORDS.has(norm)) {
-    return { kind: 'routine', reason: 'rule:silent' };
+    return { kind: 'routine', reason: 'rule:silent', shortCircuit: true };
   }
 
   // 3) 极短句：交给 LLM，不预设情感倾向
@@ -223,11 +230,22 @@ export function createJudge({ classify, cacheSize = 512, logger } = {}) {
    * @returns {Promise<{kind:string, source:'rule'|'cache'|'llm'|'fallback', reason:string}>}
    */
   async function judge(text) {
-    // 第一层：规则筛子
+    // 规则只做**短路优化**，不再抢占判定权（v0.9）
+    //
+    // 原实现让规则优先：命中即返回，模型根本没机会看这句话。
+    // 实测 31 条里规则硬判 3 条，虽然都判对了，但原则不对 ——
+    // 既然决定相信模型，就不该让它看不到 90% 的句子。
+    //
+    // 保留的两种短路是**无歧义**的：
+    //   - 极短应声词（"嗯"/"哦"）→ routine：没有事件，不值得调模型
+    //   - 空串 → routine
+    //
+    // 其余（含 betrayal/loss 这类正则）全部交给模型；
+    // 规则退到降级路径（模型不可用时才用）。
     const filtered = ruleFilter(text);
-    if (filtered.kind) {
+    if (filtered.shortCircuit) {
       stats.ruleHits++;
-      return { kind: filtered.kind, source: 'rule', reason: filtered.reason };
+      return { kind: filtered.kind, valence: 0, source: 'rule', reason: filtered.reason };
     }
 
     // 缓存

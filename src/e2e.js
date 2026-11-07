@@ -701,6 +701,44 @@ console.log('=== 14d. 模型效价优先 ===');
 }
 
 // ---------------------------------------------------------------------------
+// 14e. kind 交给模型（v0.9）
+//
+//     规则只保留「无歧义的极短应声词」短路，其余一律让模型判定。
+//     原实现让规则优先，模型看不到 90% 的句子。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14e. kind 交给模型 ===');
+{
+  // 应声词：短路（不值得调模型）
+  for (const w of ['嗯', '哦', '好的']) {
+    check(`应声词「${w}」短路为 routine`,
+      ruleFilter(w).reason === 'rule:silent', ruleFilter(w).reason);
+  }
+
+  // 曾经被规则硬判的句子：现在必须交给模型复核（不是短路）
+  const mustReachLlm = [
+    ['你骗我', '背叛'],
+    ['我奶奶去世了', '丧失'],
+    ['对不起', '修复'],
+    ['别管我', '疏远'],
+    ['烦死了', '冲突'],
+  ];
+  let reached = 0;
+  for (const [t, label] of mustReachLlm) {
+    const f = ruleFilter(t);
+    if (f.shortCircuit !== true) reached++;
+    else console.log(`    ⚠️ ${label}「${t}」仍被规则短路: ${f.kind}`);
+  }
+  check('情感语句交给模型复核（不短路）', reached === mustReachLlm.length,
+    `${reached}/${mustReachLlm.length}`);
+
+  // 规则建议仍保留：模型不可用时降级路径要用
+  const fb = ruleFilter('你骗我');
+  check('规则建议仍保留（降级用）', fb.kind === 'betrayal', `${fb.kind}`);
+}
+
+// ---------------------------------------------------------------------------
 // 15. 角色设定（v0.7）
 //
 //     之前 renderPersona 只输出"性情还没有明显变化"，等于告诉模型"你没有性格"，

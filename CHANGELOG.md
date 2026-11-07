@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.9.0
+
+The model now decides the event kind too, not just the valence.
+
+### What changed
+
+`ruleFilter` used to return a kind that `judge()` accepted immediately — the model
+never saw those sentences. On the 31-utterance set that was only 3 cases, and all
+3 were correct, but the principle was wrong: having decided to trust the model, it
+should not be blindfolded on any sentence with content.
+
+Rules are now explicitly tagged:
+
+- `rule:silent` (嗯 / 哦 / 好的) and empty input → `shortCircuit: true`. These carry
+  no event information; asking the model only adds variance ("嗯" can come back as
+  `distance`).
+- every other rule (betrayal / loss / repair / conflict / distance) →
+  `shortCircuit: false`. The suggestion is kept for the degradation path but the
+  model gets to review it.
+
+### Effect on the hard cases
+
+| text | before | after |
+|---|---|---|
+| 不愧是你 | distance, -0.30 | support, +0.70 |
+| 这波操作可以 | distance, -0.30 | support, +0.60 |
+| 感觉自己挺没用的 | routine, 0.00 | intimacy, -0.65 |
+| 真是谢谢你啊 | support, +1.00 | conflict, -0.55 |
+
+### A note on prompt length
+
+Tried a compressed prompt (~40% shorter). It broke exactly the cases that matter:
+「不愧是你」→ intimacy, 「感觉自己挺没用的」→ support (polarity inverted). The long
+prompt's examples earn their tokens; not compressing.
+
+### Also
+
+`intimacy` carries both polarities legitimately, so it is excluded from
+`reconcileValence`'s floors.
+
+e2e 89 → **94 assertions**.
+
 ## 0.8.0
 
 Event classification now returns valence alongside the kind, and the model's

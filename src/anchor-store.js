@@ -159,8 +159,12 @@ export async function processResolution(anchors, text, deps = {}) {
       }
     }
 
-    // 降级：只在模型**完全失败**时才用规则（它多半返回 unknown，即"不动"）。
-    // 模型给出了明确标签就先信模型 —— 规则在歧义句上不如它。
+    // 降级：**只在模型完全失败时**才用规则（它多半返回 unknown，即"不动"）。
+    //
+    // 关键区分（v0.10.2 修）：模型明确回答 `unrelated`/`unknown` 时，
+    // verdict 不是 null，绝不能降级。早先把 `unrelated` 排除在合法标签外，
+    // 导致模型越守规矩（老实答 unrelated）越容易触发规则降级，
+    // 而 "出院手续还没办" 这类否定句会被规则判成 resolved —— 锚点被误关且不可恢复。
     if (verdict === null) {
       const ruleVerdict = ruleResolve(text);
       if (ruleVerdict !== 'unknown') {
@@ -182,7 +186,10 @@ export async function processResolution(anchors, text, deps = {}) {
       a.mentions = a.mentions ?? [];
       a.mentions.push({ at: Date.now(), excerpt: summarize(text, 80) });
     }
-    // unknown → 什么都不做。判不清就不动。
+    // unrelated / unknown → 什么都不做。
+    //   unrelated = 模型读懂了，判断不是同一件事的进展
+    //   unknown   = 判不清
+    // 两者都保持 open —— 误关一个锚点，那段记忆就再也想不起来了。
   }
 
   return { changed, checked };

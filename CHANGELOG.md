@@ -1,5 +1,106 @@
 # Changelog
 
+## 0.10.2
+
+Independent audit fixes. Seven confirmed defects, each reproduced before being fixed.
+
+### H1 — withStateLock called as a function (every turn threw TypeError)
+
+```js
+void withStateLock(async () => { ... })()      // ← 对 Promise 再调用
+```
+
+`withStateLock` returns a Promise, so this threw `TypeError: withStateLock(...) is not
+a function` on the synchronous stack of every `session/event`. The host swallowed it,
+so the only symptom was a warn line per turn — and the real `.catch` handler never ran.
+
+Fixed by deleting the extra `()`.
+
+### H2 — `unrelated` was not a recognised verdict, so rules could reverse meaning
+
+The prompt offers three labels including `unrelated`, but `RESOLVE_KINDS` omitted it.
+The model answering faithfully produced `null`, which `processResolution` treats as
+**model failure** → fell back to rules → 「出院手续还没办」 judged `resolved` (meaning
+reversed). The audit's sharpest point: **the more faithfully the model behaves, the
+more likely the fallback fires.**
+
+Fixed: `unrelated` is a first-class verdict; it and `unknown` both leave state alone,
+and neither triggers rule fallback. Only a genuine parse failure does.
+
+### H3 — shared recall: keep the sharing, fix the side effects
+
+Cross-session sharing is **intended**: 鲸鲸 should remember what was said in any
+conversation. But two consequences were bugs, not features:
+
+- **Crosstalk** — one global `pendingRecallText`, cleared at every turn entry. If B
+  spoke while A had an unseen recollection, A lost it.
+- **Accounting** — `markRecalled` fired at write time, so a recollection that never
+  reached the model still consumed the 1-hour cooldown and decayed its weight.
+
+Fixed: recall content stays shared, but each session keeps its own copy
+(`recallBySession`), and `markRecalled` is deferred to actual consumption
+(`pendingMarkBySession`). Sharing preserved; crosstalk and misfired accounting gone.
+
+### M1 — negative-event counter accumulated for life
+
+`negativeSinceMutation` only ever incremented, and reset only on successful mutation.
+Once it reached 3 it stayed there, so after enough complaining **any single strong
+event could mutate**. Verified: 30 rounds of 「今天好累」 then one 「你骗了我」 →
+mutated. Rest never touched it: 500 rounds of rest left it unchanged.
+
+Fixed: it now decays during rest (`NEGATIVE_DECAY_REST = 0.72`), reaching zero in
+about 12 rest rounds (~2 days of normal use).
+
+### M2 — 「我有点累」 mutated in 5 turns; 「今天好累」 never did
+
+`DISCLOSURE_EMOTION` included 「我有点」/「我有些」, pushing `selfDisclosure` to 0.75,
+which adds 0.3 to `novelty` — doubling `shock` from 0.1779 to 0.3489 and clearing the
+0.20 mutation gate.
+
+Measured: 「今天好累」 40 rounds → no mutation. 「我有点累」 → mutated on round 5.
+One extra 「我」.
+
+Fixed: removed those two from the list. 「我很累」 and 「我特别累」 keep the escalation —
+they carry intensity adverbs and should register.
+
+### M3 — rest() decayed trustDamage six times faster than step()
+
+`rest()` hardcoded `0.97` (half-life 22.8 rounds) while `step()` uses `TRUST_DECAY =
+0.995` (138.3 rounds). Simulating a real rhythm — 20 conflict turns by day, 8 rest
+rounds at night — trustDamage lost 22% overnight, contradicting "伤过就是伤过".
+
+Fixed: `rest()` uses `TRUST_DECAY`. Verified half-life now 139 rounds.
+
+### M4 — any mention of 医院 recalled a hospital anchor
+
+`住院`/`医院` were `W_PRIMARY` (1.0), above the 0.6 threshold on their own. Five of
+seven test sentences misfired:
+
+- 我朋友住院了，我去探望
+- 医院附近的饭好难吃
+- 我们公司楼下那家医院的食堂
+- 我同事住院了，我得替他值班
+
+Fixed with a combination criterion instead of a single high weight:
+
+- place words dropped to `W_STRONG` (0.55) — not enough alone
+- person words (妈/爸/奶奶…) raised to `W_STRONG` — place + person = 1.10, fires
+- place words in an **action** position (`去医院`, `住院了`) add 0.55 — covers
+  subject-dropped Chinese like 「今天去医院了」
+- place words as **background** (`医院附近`, `医院好远`) add nothing
+- third-party subjects (朋友/同事…) block the action bonus
+
+`isSameTopic` needed a companion change: with `住院` no longer primary, two anchors
+about the same person could not merge. It now also matches on person-word overlap
+when both sides mention a health/place word.
+
+Result: 0 false positives on 5 unrelated sentences, 0 misses on 4 continuations.
+
+### Tests
+
+e2e 106 → **119 assertions**, with one regression guard per defect above.
+`H3①` is asserted as *expected behaviour* so nobody "fixes" the sharing later.
+
 ## 0.10.1
 
 Panel fix: the usage section rendered blank and took the whole panel with it.

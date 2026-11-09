@@ -33,7 +33,17 @@ const RESOLVED_RE = /(出院|康复|痊愈|好多了|好转|已经好了|病好�
 const CONTINUING_RE = /(还在|仍在|继续|再次|又犯|复发|住院中|又住院|没好转|加重|恶化|不太好)/;
 
 /** 判定结果 */
-export const RESOLVE_KINDS = ['resolved', 'continuing', 'unknown'];
+export const RESOLVE_KINDS = ['resolved', 'continuing', 'unrelated', 'unknown'];
+
+/**
+ * 模型**明确回答**的标签（区别于解析失败）。
+ *
+ * `unrelated` 和 `unknown` 都不改变锚点状态，但语义不同：
+ *   unrelated = 模型读懂了，判断为"只是提到相关的人/词，不是这件事的进展"
+ *   unknown   = 判不清
+ * 两者都不该触发规则降级 —— 降级只在模型失败时才有意义。
+ */
+export const MODEL_VERDICTS = new Set(['resolved', 'continuing', 'unrelated']);
 
 /**
  * 规则判定 —— **降级路径专用**，不是主路径。

@@ -23,6 +23,18 @@ export const LOAD_DECAY = 0.92;
 /** 闲置时更强的恢复 */
 export const LOAD_DECAY_REST = 0.85;
 
+/**
+ * 负性事件计数的闲置衰减（M1 修复）。
+ *
+ * 这个计数是突变的第五个条件（至少经历 N 次独立负性事件）。
+ * 早先它只加不减、只有突变成功才清零 → **终身累计**，
+ * 一旦到过 3，之后任意一次强事件都能单发突变。
+ *
+ * 0.72 的取法：每轮 rest 衰减，每天最多 8 轮 rest，
+ * 一天约 ×0.07，两三天归零。与"最近这段时间有没有被反复伤害"的语义一致。
+ */
+export const NEGATIVE_DECAY_REST = 0.72;
+
 /** 漂变门槛：累积负荷超过此值才开始改变人格 */
 export const DRIFT_THRESHOLD = 0.55;
 /** 漂变速率 */
@@ -470,14 +482,25 @@ export function rest(state, rounds = 1) {
   let sensitivity = state.sensitivity;
   let cooldown = state.cooldown;
   let trustDamage = state.trustDamage ?? 0;
+  // M1 修复：负性事件计数也要冷却，否则它会**终身累计** ——
+  // 一旦到过 3，之后任意一次跨过 shock 的事件都能单发突变，
+  // "单次事件不突变"的承诺就只在计数器为零时成立。
+  //
+  // 用与 cooldown 相近的时间尺度（每天上限 8 轮 rest，约 3 天归零）。
+  let negativeSinceMutation = state.negativeSinceMutation ?? 0;
   for (let i = 0; i < rounds; i++) {
     load *= LOAD_DECAY_REST;
     sensitivity *= LOAD_DECAY_REST;
-    // 闲置也修复关系，但比 load 慢得多 —— 这正是"伤过"和"累了"的区别
-    trustDamage *= 0.97;
+    // M3 修复：闲置修复用 TRUST_DECAY（与 step 同率），不要硬编码 0.97。
+    // 早先 0.97 的半衰是 22.8 轮，而 step 的 0.995 是 138.3 轮 —— 差 6 倍，
+    // 结果是"白天吵架、睡一觉洗掉 22%"，与"伤过就是伤过"的设计意图相反。
+    trustDamage *= TRUST_DECAY;
+    // 负性事件计入"最近"而非"终身"：每轮 rest 衰减一次
+    negativeSinceMutation *= NEGATIVE_DECAY_REST;
+    if (negativeSinceMutation < 1) negativeSinceMutation = 0;
     if (cooldown > 0) cooldown -= 1;
   }
-  return { ...state, load, sensitivity, cooldown, trustDamage };
+  return { ...state, load, sensitivity, cooldown, trustDamage, negativeSinceMutation };
 }
 
 // ---------------------------------------------------------------------------

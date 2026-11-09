@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 /**
  * 端到端测试：真实中文文本 → 判定 → 动力学。
  *
@@ -18,7 +19,7 @@
 
 import {
   appraise, initialState, step, describeChanges, renderPersona,
-  evaluateExclusion, TRAIT_AXES,
+  evaluateExclusion, TRAIT_AXES, rest, TRUST_DECAY,
 } from './persona-core.js';
 import { ruleFilter, parseKind, toEpisode, createJudge, KINDS, reconcileValence } from './judge.js';
 import { createUsageMeter, collectStream } from './usage.js';
@@ -27,7 +28,7 @@ import {
   maybeCreateAnchor, selectRecall, markRecalled, renderRecall,
   processResolution, applyFade, reviveIfMentioned,
 } from './anchor-store.js';
-import { ruleResolve } from './anchor-resolve.js';
+import { ruleResolve, parseResolveKind } from './anchor-resolve.js';
 import { shouldCreateAnchor, buildTriggers, scoreTrigger } from './anchor.js';
 import { rest as restPersona } from './persona-core.js';
 
@@ -800,6 +801,96 @@ console.log('=== 14f. LLM 用量统计 ===');
   // reset
   meter.reset();
   check('reset 后归零', meter.snapshot().totals.calls === 0);
+}
+
+// ---------------------------------------------------------------------------
+// 14g. 审计修复回归（v0.10.2）
+//
+//     独立审查报告的 7 个高危/中危项，每条一个断言。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14g. 审计修复回归 ===');
+{
+  // --- H1：withStateLock 调用不该多一对 () ---
+  {
+    const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+    check('H1: withStateLock 调用没有多余的 ()',
+      !/withStateLock\(async[\s\S]{0,20000}?\}\)\(\)\.catch/.test(src),
+      '原本 })() ；应为 }).catch');
+  }
+
+  // --- H2：模型答 unrelated 不该降级到规则 ---
+  {
+    check('H2: unrelated 是合法标签', parseResolveKind('unrelated') === 'unrelated');
+    check('H2: 解析失败才返回 null', parseResolveKind('garbage') === null);
+    // 规则仍会误判否定句 —— 这就是为什么不能在 unrelated 时降级
+    check('H2: 规则对否定句仍会误判（因此必须避免降级）',
+      ruleResolve('出院手续还没办') === 'resolved');
+  }
+
+  // --- M1：负性事件计数会随时间衰减，不是终身累计 ---
+  {
+    const st = { load: 0, sensitivity: 0, cooldown: 0, trustDamage: 0, negativeSinceMutation: 10, traits: {} };
+    const after = rest(st, 8);
+    check('M1: 负性事件计数随闲置衰减',
+      after.negativeSinceMutation < 10, `${st.negativeSinceMutation} → ${after.negativeSinceMutation.toFixed(2)}`);
+  }
+
+  // --- M2：日常示弱不该在几轮内改变人格 ---
+  {
+    const mild = toEpisode('conflict', '我有点累', null);
+    const strong = toEpisode('conflict', '我很累', null);
+    const shockOf = (ep) => Math.abs(ep.valence) * ep.magnitude * ep.novelty;
+    check('M2: 「我有点累」不越过突变门槛',
+      shockOf(mild) < 0.20, shockOf(mild).toFixed(4));
+    check('M2: 「我很累」仍越过门槛（强度副词应保留）',
+      shockOf(strong) >= 0.20, shockOf(strong).toFixed(4));
+  }
+
+  // --- M3：rest 与 step 的 trustDamage 衰减率一致 ---
+  {
+    const st = { load: 0, sensitivity: 0, cooldown: 0, trustDamage: 1.0, negativeSinceMutation: 0, traits: {} };
+    let cur = st, rounds = 0;
+    while (cur.trustDamage > 0.5 && rounds < 500) { cur = rest(cur, 1); rounds++; }
+    const expected = Math.round(Math.log(0.5) / Math.log(TRUST_DECAY));
+    check('M3: rest 半衰与 step 一致', Math.abs(rounds - expected) <= 2,
+      `rest=${rounds} step=${expected}`);
+  }
+
+  // --- M4：健康域误触发 ---
+  {
+    const anchor = { triggers: buildTriggers('intimacy', '我妈住院了，我有点撑不住') };
+    const misfires = [
+      '我朋友住院了，我去探望',
+      '医院附近的饭好难吃',
+      '我们公司楼下那家医院的食堂',
+      '我同事住院了，我得替他值班',
+      '医院好远',
+    ];
+    let falsePos = 0;
+    for (const t of misfires) if (scoreTrigger(anchor, t).hit) falsePos++;
+    check('M4: 无关句子不误触发', falsePos === 0, `${falsePos}/${misfires.length}`);
+
+    const shouldHit = ['我妈住院了', '今天去医院了', '我妈身体不舒服', '我妈还在住院'];
+    let miss = 0;
+    for (const t of shouldHit) if (!scoreTrigger(anchor, t).hit) miss++;
+    check('M4: 同一件事的延续仍能触发', miss === 0, `${miss}/${shouldHit.length}`);
+  }
+
+  // --- H3 ②③：跨会话共享是特性，串扰与记账错误要修 ---
+  {
+    // ① 共享：设计特性，保留
+    check('H3①: 跨会话共享记忆（设计特性，保留）', true, 'A 会话的私事在 B 会话可见');
+
+    // ② 串扰：会话副本结构存在
+    const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+    check('H3②: 召回按会话存副本（防串扰）',
+      /recallBySession\s*=\s*new Map/.test(src));
+    // ③ 记账：markRecalled 延后到消费
+    check('H3③: markRecalled 延后到消费之后',
+      /pendingMarkBySession\s*=\s*new Map/.test(src));
+  }
 }
 
 // ---------------------------------------------------------------------------

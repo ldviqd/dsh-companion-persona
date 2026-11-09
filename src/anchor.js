@@ -47,14 +47,25 @@ export const ANCHOR_KINDS = new Set(['intimacy', 'loss', 'betrayal']);
  *
  * 分三档：主导词（事件核心，单独即可）/ 强关联 / 泛化词（单独不够）。
  */
+/**
+ * 主导词（权重 1.0，单独命中即越过阈值 0.6）。
+ *
+ * M4 修复：「住院」从 intimacy 主导词里移出，降到 STRONG(0.55)。
+ *
+ * 理由是它属于**场所/动作**而非**事件指向**：`住院` 本身不说明是谁、什么事。
+ * 实测把它留在主导词时单独命中就有 1.0，导致
+ * "我朋友住院了""我同事住院了"这类与「我妈住院了」完全无关的句子被误召回。
+ *
+ * 移出后，要触发需要当事人词（妈/爸/奶奶…）配合 —— 这才是同一件事的证据。
+ */
 const PRIMARY_WORDS = {
-  intimacy: ['住院', '手术', '生病', '离职', '辞职', '分手', '离婚', '结婚', '怀孕', '搬家', '去世'],
+  intimacy: ['手术', '生病', '离职', '辞职', '分手', '离婚', '结婚', '怀孕', '搬家', '去世'],
   loss: ['去世', '过世', '走了', '离世', '葬礼'],
   betrayal: ['骗', '瞒', '背叛', '出轨'],
 };
 
 /** 强关联词：与主导词同时出现时加强，单独也能接近阈值 */
-const STRONG_WORDS = ['医院', '病房', '检查', '治疗', '手术台', '出院', '康复'];
+const STRONG_WORDS = ['医院', '住院', '病房', '检查', '治疗', '手术台', '出院', '康复'];
 
 /** 泛化词：家人称呼等。单独绝不触发（"妈妈咪呀"的教训） */
 const WEAK_WORDS = [
@@ -140,13 +151,31 @@ export function buildTriggers(kind, text) {
    */
   const touchesHealth = /住院|手术|医院|生病|身体|病|出院|复查|治疗/.test(s);
   if (touchesHealth) {
-    // 医院/住院是健康事件的核心场所与动作，单独命中就该触发（0.55 差一点点，
-    // 提到"今天去医院了"基本就是在延续这件事）
-    for (const w of ['医院', '住院']) add(w, W_PRIMARY);
-    for (const w of ['身体', '生病', '病', '出院', '复查']) add(w, W_STRONG);
+    // M4 修复：场所词不再单独给满分（原先是 W_PRIMARY=1.0，单命中即越过 0.6）。
+    //
+    // 早先实测误触发 5/7：
+    //   "我今天去医院看朋友了"        → 1.00 误触发
+    //   "我朋友住院了，我去探望"       → 1.00 误触发
+    //   "医院附近的饭好难吃"          → 1.00 误触发
+    //   "我们公司楼下那家医院的食堂"    → 1.00 误触发
+    //   "我同事住院了，我得替他值班"    → 1.00 误触发
+    //
+    // 判据改为「场所 + 当事人」组合：
+    //   医院/住院 给 W_STRONG(0.55)，当事人词给 W_STRONG(0.55) —— 两者同时出现 1.10 必触发；
+    //   单独一个 0.55 < 0.6 不触发。
+    // 这比"单给场所词满分"准得多，也保住了"今天去医院了"这种延续表达
+    // （它有当事人词「我」——见下方 selfPerson 的补充权重）。
+    for (const w of ['医院', '住院']) add(w, W_STRONG);
+    for (const w of ['身体', '出院', '复查']) add(w, W_STRONG);
+    // 注意：不再单独加 '病' —— 它与 '生病' 是子串关系，会重复计分
+    // （"我生病了"曾因 生病+病 双命中拿到 1.1 分）
+    //
+    // 当事人词提到 STRONG：它们才是"这件事和谁有关"的核心线索
     for (const w of ['妈', '爸', '父母', '家人', '奶奶', '爷爷']) {
-      if (!seen.has(w)) add(w, W_WEAK);
+      if (!seen.has(w)) add(w, W_STRONG);
     }
+    // 注意：不要把「我」塞进触发词表 —— 它是泛词，会污染评分。
+    // "今天去医院了" 这类"说话人自己在场"的判断放在 scoreTrigger 里做（见 selfPresent）。
   }
   const touchesLoss = /去世|走了|过世|离世/.test(s);
   if (touchesLoss) {
@@ -184,6 +213,31 @@ export function scoreTrigger(anchor, text) {
       score += weight;
       matched.push(word);
     }
+  }
+
+  /**
+   * M4 组合判据（评分侧，不是建锚侧）。
+   *
+   * 场所词（医院/住院）单独命中只有 0.55，差一点点。但"说话人自己在场"
+   * 足以补齐：「今天去医院了」是同一件事的延续。
+   *
+   * 排除「我朋友/我同事/我同学…」—— 那时"我"是定语不是当事人。
+   * 这个判断必须看**当前文本**，不能在建锚时固化进词表
+   * （试过那样做，结果所有含"我"的句子都被加 0.55）。
+   */
+  // 场所词单独 0.55 差一口气。两种情况该补齐：
+  //   ① 有当事人词（妈/爸/奶奶…）—— 已在词表里，自然累加
+  //   ② **场所词处于动作位置**（"去医院""住院了""出院了"）—— 说话人在讲经过
+  //
+  // 不该补齐的是**场所描述**（"医院附近的饭""医院好远""医院楼下"）：
+  // 那里场所只是背景，不是事件。
+  const PLACE_ACTION = /(去|在|到|回|来|住|出|办|跑)(了)?(一?趟)?(医院|病房|住院|复查|出院)|(医院|住院|病房|复查)(了|中)/;
+  const PLACE_BACKGROUND = /(附近|旁边|楼下|周边|门口|食堂|路上|好远|很远|那边)/;
+  const OTHER_SUBJECT = /朋友|同事|同学|邻居|室友|别人|他人/;
+
+  if (PLACE_ACTION.test(s) && !PLACE_BACKGROUND.test(s) && !OTHER_SUBJECT.test(s)) {
+    score += 0.55;
+    matched.push('(事件)');
   }
 
   return { score: round(score), matched, hit: score >= TRIGGER_THRESHOLD };
@@ -228,12 +282,28 @@ export function makeAnchorId(now = Date.now()) {
 export function isSameTopic(a, b) {
   if (!a || !b) return false;
   if (a.state === 'resolved' || b.state === 'resolved') return false;
-  const primary = (x) => (x.triggers ?? [])
-    .filter((t) => (typeof t === 'string' ? 0.5 : (t?.weight ?? 0)) >= W_PRIMARY)
+
+  const words = (x, minWeight) => (x.triggers ?? [])
+    .filter((t) => (typeof t === 'string' ? 0.5 : (t?.weight ?? 0)) >= minWeight)
     .map((t) => (typeof t === 'string' ? t : t.w));
-  const pa = new Set(primary(a));
-  if (pa.size === 0) return false;
-  return primary(b).some((w) => pa.has(w));
+
+  // ① 主导词重叠（最可靠）
+  const pa = new Set(words(a, W_PRIMARY));
+  if (pa.size > 0 && words(b, W_PRIMARY).some((w) => pa.has(w))) return true;
+
+  // ② 当事人词重叠（M4 修复的补充）
+  //
+  // 「住院」从主导词降级为强关联词后，两个关于同一个人健康事件的锚点
+  // 不再能靠主导词合并：「我妈住院了」与「今天去医院了」都只剩强关联词。
+  // 改为看**当事人词**是否重叠 —— 妈/爸/奶奶… 才是"这件事和谁有关"的身份锚。
+  const SUBJECTS = ['妈', '爸', '父母', '家人', '奶奶', '爷爷', '外婆', '外公'];
+  const sa = new Set(words(a, W_STRONG).filter((w) => SUBJECTS.includes(w)));
+  if (sa.size === 0) return false;
+  // 双方提到同一个人 + 都涉及健康/场所词 → 同一件事
+  const PLACE_WORDS = ['医院', '住院', '病房', '复查', '出院', '身体'];
+  const aHasPlace = words(a, W_STRONG).some((w) => PLACE_WORDS.includes(w));
+  const bHasPlace = words(b, W_STRONG).some((w) => PLACE_WORDS.includes(w));
+  return aHasPlace && bHasPlace && words(b, W_STRONG).some((w) => sa.has(w));
 }
 
 function round(v, d = 4) {

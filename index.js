@@ -170,8 +170,26 @@ export async function apply(ctx, config) {
    * 为什么用变量而不是在 section 的 text() 里实时计算：
    * section 每次装配都会调用 text()，而"这一轮提到了什么"是**轮次级**信息。
    * 在 turn/end 时算一次、存起来，下次装配读取 —— 语义正确，也不会重复计算。
+   *
+   * ## 跨会话语义（v0.10.2）
+   *
+   * **设计特性**：鲸鲸在所有会话里共享同一份记忆 —— A 会话提到的私事，
+   * B 会话也该记得。这是陪伴体该有的样子，不是 bug。
+   *
+   * **但有两个真 bug 要修**：
+   *   ② 串扰：早先只有一个全局变量，B 会话入口清空它，
+   *      A 该看到的回忆就丢了（并发会话互相踩）
+   *   ③ 记账：markRecalled 在写入时立即调用，"没送达的召回"照样吃冷却
+   *
+   * 修法：召回内容仍然共享（保留特性），但**每个会话持有自己的副本**，
+   * 只在各自装配后消费；markRecalled 延后到确认消费之后。
    */
   let pendingRecallText = '';
+
+  /** 每个会话的待注入副本：sessionId → 渲染好的召回文本 */
+  const recallBySession = new Map();
+  /** 每个会话尚未记账的已注入锚点：sessionId → anchor[] */
+  const pendingMarkBySession = new Map();
 
   /**
    * 最近一次排除判定的结果。
@@ -331,8 +349,29 @@ export async function apply(ctx, config) {
           text: () => {
             if (state.enabled?.inject === false) return '';
             try {
-              // 用上一轮记录的待注入锚点（在 turn/end 时算好）
-              return pendingRecallText;
+              // 优先取本会话的副本；没有则退回共享值（跨会话共享记忆是设计特性）。
+              //
+              // 用副本而不是直接读全局变量，是为了修两个并发 bug：
+              //   - 别会话清空全局变量时，本会话还没消费的召回不该丢
+              //   - 记markRecalled 延后到真正消费之后，没送达的不吃冷却
+              const sid = String(
+                (() => { try { return agent.session?.id; } catch { return null; } })()
+                ?? 'unknown',
+              );
+              const own = recallBySession.get(sid);
+              const text = own !== undefined ? own : pendingRecallText;
+
+              // 消费即记账：这一轮确实注入了，才给锚点记冷却与权重衰减
+              if (own !== undefined) {
+                const marks = pendingMarkBySession.get(sid);
+                if (marks && marks.length > 0) {
+                  for (const r of marks) {
+                    try { markRecalled(r.anchor, Date.now()); } catch { /* 忽略单条失败 */ }
+                  }
+                  pendingMarkBySession.delete(sid);
+                }
+              }
+              return text;
             } catch {
               return '';
             }
@@ -380,6 +419,7 @@ export async function apply(ctx, config) {
      * 在入口清空能保证"最多注入一次"，代价是那一轮如果被排除，回忆就丢了
      * （可以接受：被排除的对话本来就不该产生人格影响）。
      */
+    // 入口只清全局值；各会话副本保留到各自消费为止（修并发串扰）
     pendingRecallText = '';
 
     // 只处理真人对话轮次（有 user 消息的）
@@ -455,6 +495,13 @@ export async function apply(ctx, config) {
     // 所以人格变化在下一轮生效 —— 这符合直觉，也不阻塞对话。
     // 用 withStateLock 串行化：await 前后跨共享 state 必须串行，否则丢更新。
     void withStateLock(async () => {
+      // 会话标识：用于召回副本与记账归属。
+      // 拿不到 id 时退回 agentHint，再退回固定串 —— 保证 Map 键永不为 undefined。
+      const sessionId = String(
+        (() => { try { return session.id; } catch { return null; } })()
+        ?? agentHint ?? 'unknown',
+      );
+
       const verdict = await judge.judge(text, agentHint);
       const kind = verdict.kind;
       if (!kind) return;
@@ -491,7 +538,11 @@ export async function apply(ctx, config) {
           const recalled = selectRecall(anchors, text, Date.now());
           if (recalled.length > 0) {
             pendingRecallText = renderRecall(recalled);
-            for (const r of recalled) markRecalled(r.anchor, Date.now());
+            // 同时写一份本会话副本：别的会话清空全局变量时，这份不受影响
+            recallBySession.set(sessionId, pendingRecallText);
+            // 记账延后：等这个会话真正消费这轮召回才 markRecalled。
+            // 早先立即记账 → 没送达的召回照样吃 1 小时冷却并衰减权重。
+            pendingMarkBySession.set(sessionId, recalled);
             if (config.audit) {
               appendLedger(join(statePath, '..', 'ledger.jsonl'), {
                 at: Date.now(), kind: 'recall', signals: {}, before: {}, after: {},
@@ -501,6 +552,9 @@ export async function apply(ctx, config) {
             }
           } else {
             pendingRecallText = '';
+            // 本轮没有召回 → 清掉本会话副本，避免上一轮的回忆重复注入
+            recallBySession.delete(sessionId);
+            pendingMarkBySession.delete(sessionId);
           }
 
           const created = maybeCreateAnchor(anchors, {
@@ -607,7 +661,7 @@ export async function apply(ctx, config) {
     }
 
     void persist();
-    })().catch((err) => logger?.warn?.(`人格更新失败: ${String(err?.message ?? err)}`));
+    }).catch((err) => logger?.warn?.(`人格更新失败: ${String(err?.message ?? err)}`));
   });
 
   // ---------------------------------------------------------------------------

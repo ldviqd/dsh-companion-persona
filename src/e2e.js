@@ -21,6 +21,7 @@ import {
   evaluateExclusion, TRAIT_AXES,
 } from './persona-core.js';
 import { ruleFilter, parseKind, toEpisode, createJudge, KINDS, reconcileValence } from './judge.js';
+import { createUsageMeter, collectStream } from './usage.js';
 import { extractSignals, inferEventKind } from './signals.js';
 import {
   maybeCreateAnchor, selectRecall, markRecalled, renderRecall,
@@ -736,6 +737,69 @@ console.log('=== 14e. kind 交给模型 ===');
   // 规则建议仍保留：模型不可用时降级路径要用
   const fb = ruleFilter('你骗我');
   check('规则建议仍保留（降级用）', fb.kind === 'betrayal', `${fb.kind}`);
+}
+
+// ---------------------------------------------------------------------------
+// 14f. LLM 用量统计（v0.10）
+//
+//     只统计本插件自己发起的调用（judge / anchor-resolve），
+//     不含主对话本身。适配器不给 usage 时要能标记出来。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14f. LLM 用量统计 ===');
+{
+  const meter = createUsageMeter();
+
+  // 正常用量
+  meter.record('judge', { inputTokens: 200, outputTokens: 10, totalTokens: 210 },
+    { ok: true, ms: 1800, model: 'p/m' });
+  // totalTokens 缺失 → 应回退为 input+output
+  meter.record('judge', { inputTokens: 100, outputTokens: 5 }, { ok: true });
+  // 适配器不给 usage
+  meter.record('anchor-resolve', null, { ok: true });
+  // 失败调用
+  meter.record('anchor-resolve', null, { ok: false });
+
+  const s = meter.snapshot();
+  check('总调用计数正确', s.totals.calls === 4, `${s.totals.calls}`);
+  check('输入 token 累加正确', s.totals.inputTokens === 300, `${s.totals.inputTokens}`);
+  check('输出 token 累加正确', s.totals.outputTokens === 15, `${s.totals.outputTokens}`);
+  check('totalTokens 缺失时回退为相加',
+    s.totals.totalTokens === 210 + 105, `${s.totals.totalTokens}`);
+  check('失败计数正确', s.totals.failures === 1, `${s.totals.failures}`);
+  check('分桶：judge 2 次', s.buckets.judge.calls === 2, `${s.buckets.judge.calls}`);
+  check('分桶：anchor-resolve 2 次',
+    s.buckets['anchor-resolve'].calls === 2, `${s.buckets['anchor-resolve'].calls}`);
+  check('缺失 usage 被标记', s.recent.filter((r) => r.missing).length === 2,
+    `${s.recent.filter((r) => r.missing).length}`);
+
+  // collectStream 正确拼接文本并捕获 usage
+  const chunks = (async function* () {
+    yield { type: 'text-delta', text: 'kind=' };
+    yield { type: 'text-delta', text: 'support' };
+    yield { type: 'usage', usage: { inputTokens: 50, outputTokens: 6, totalTokens: 56 } };
+    yield { type: 'finish', reason: 'stop' };
+  })();
+  let captured = null;
+  const out = await collectStream(chunks, (u) => { captured = u; });
+  check('collectStream 拼接文本正确', out === 'kind=support', out);
+  check('collectStream 捕获 usage', captured?.totalTokens === 56, String(captured?.totalTokens));
+
+  // 流中断也要回调（记录失败）
+  let calledOnError = false;
+  const broken = (async function* () {
+    yield { type: 'text-delta', text: 'x' };
+    throw new Error('broken');
+  })();
+  try {
+    await collectStream(broken, () => { calledOnError = true; });
+  } catch { /* 预期抛出 */ }
+  check('流出错时仍回调一次', calledOnError);
+
+  // reset
+  meter.reset();
+  check('reset 后归零', meter.snapshot().totals.calls === 0);
 }
 
 // ---------------------------------------------------------------------------

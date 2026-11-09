@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.10.0
+
+The plugin now measures its own LLM usage.
+
+Event classification calls the model on every turn, and anchor resolution calls it
+again when a trigger matches. Those calls were invisible: mixed into the host's
+global accounting, with no way to tell what the persona feature costs on its own.
+
+### What it tracks
+
+The `{ type: 'usage' }` chunk from `ctx.llm.stream()`:
+
+- input / output / total tokens, split into `judge` and `anchor-resolve` buckets
+- call count and failure count per bucket
+- the last 20 calls with latency and model route
+
+Shown in the panel with a reset button. Counters live in memory only — a restart
+zeroes them, avoiding a growing state file.
+
+### Degradation is explicit
+
+Adapters do not always supply usage. When a call returns none, the record is
+flagged `missing` and the panel says so, rather than silently reporting 0 tokens.
+`totalTokens` falls back to input + output when the provider omits it.
+
+`collectStream` reports usage in a `finally` block, so a stream that throws still
+gets recorded — a failed call is still a call that cost tokens.
+
+### What it does not do
+
+No price conversion. Provider pricing changes and hardcoding it would rot.
+
+e2e 94 -> **106 assertions**.
+
 ## 0.9.0
 
 The model now decides the event kind too, not just the valence.

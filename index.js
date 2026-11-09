@@ -30,6 +30,7 @@ import {
 } from './src/persona-core.js';
 import { extractSignals, inferEventKind, calibrateValence } from './src/signals.js';
 import { createJudge, toEpisode, CLASSIFIER_PROMPT } from './src/judge.js';
+import { createUsageMeter, collectStream } from './src/usage.js';
 import {
   loadAnchors, saveAnchors, maybeCreateAnchor, selectRecall,
   markRecalled, renderRecall, processResolution, applyFade, reviveIfMentioned,
@@ -242,6 +243,9 @@ export async function apply(ctx, config) {
     return null;
   }
 
+  /** 本插件自己的 LLM 用量统计（不含主对话本身） */
+  const usageMeter = createUsageMeter();
+
   const judge = createJudge({
     classify: async (text, agentHint) => {
       const route = pickRoute(agentHint);
@@ -249,6 +253,7 @@ export async function apply(ctx, config) {
         throw new Error('no model route available for judging');
       }
       // ctx.llm.stream() 是宿主唯一的一等调用入口，带 provider 路由与回退。
+      const startedAt = Date.now();
       const chunks = ctx.llm.stream({
         provider: route.provider,
         model: route.model,
@@ -257,11 +262,19 @@ export async function apply(ctx, config) {
         maxTokens: 16,
         temperature: 0,
       });
-      let out = '';
-      for await (const chunk of chunks) {
-        if (chunk?.type === 'text-delta') out += chunk.text;
+      // collectStream 顺带捕获 { type:'usage' } chunk —— 只统计本插件的调用，
+      // 与 DSH 全局用量分开，才能看出"人格功能花了多少"。
+      let ok = true;
+      try {
+        return await collectStream(chunks, (usage) => {
+          usageMeter.record('judge', usage, {
+            ok, ms: Date.now() - startedAt, model: `${route.provider}/${route.model}`,
+          });
+        });
+      } catch (err) {
+        ok = false;
+        throw err;
       }
-      return out;
     },
     logger,
   });
@@ -516,6 +529,7 @@ export async function apply(ctx, config) {
               if (resolveCache.has(cacheKey)) return resolveCache.get(cacheKey);
               const route = pickRoute(agentHint);
               if (!route) return null;
+              const startedAt = Date.now();
               const chunks = ctx.llm.stream({
                 provider: route.provider,
                 model: route.model,
@@ -524,10 +538,11 @@ export async function apply(ctx, config) {
                 maxTokens: 12,
                 temperature: 0,
               });
-              let out = '';
-              for await (const ch of chunks) {
-                if (ch?.type === 'text-delta') out += ch.text;
-              }
+              const out = await collectStream(chunks, (usage) => {
+                usageMeter.record('anchor-resolve', usage, {
+                  ms: Date.now() - startedAt, model: `${route.provider}/${route.model}`,
+                });
+              });
               const verdict = parseResolveKind(out);
               // 缓存上限 200：一条锚点的判定期通常只有几个说法，够用
               if (verdict && resolveCache.size < 200) resolveCache.set(cacheKey, verdict);
@@ -667,6 +682,8 @@ export async function apply(ctx, config) {
       return {
         ok: true,
         value: {
+          /** 本插件自己的 LLM 用量（不含主对话） */
+          usage: usageMeter.snapshot(),
           identity: state.identity,
           traits: snapshot(state.traits),
           baseline: state.baseline,
@@ -718,6 +735,10 @@ export async function apply(ctx, config) {
      * 刻意不做"重置"：关掉只是停止行为，状态与历史保留，可随时恢复。
      * 重置人格应该是另一个明确的动作，不该混在开关里。
      */
+    async 'reset-usage'() {
+      usageMeter.reset();
+      return { ok: true, value: usageMeter.snapshot() };
+    },
     async toggle(payload) {
       const next = { ...state.enabled };
       let touched = false;

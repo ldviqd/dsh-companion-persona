@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.1
+
+Panel fix: the usage section rendered blank and took the whole panel with it.
+
+Introduced in 0.10.0. The new section used `C.badge()` and a `Row` component, both
+copied from a different plugin's style system without checking this one. Neither
+exists here — `C.badge` is `undefined`, so calling it threw and aborted the whole
+render, leaving the panel empty.
+
+Fixed by using the primitives this plugin actually has: `C.tag()` for the badges
+and an inline `kv()` helper instead of `Row`.
+
+Verified all 20 `C.*` references now resolve. Front-end only — a page refresh is
+enough, no restart.
+
 ## 0.10.0
 
 The plugin now measures its own LLM usage.

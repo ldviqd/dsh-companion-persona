@@ -680,44 +680,49 @@ window.__ModuleLoader__.load({
       const usage = data.usage;
       if (usage && usage.totals) {
         const t = usage.totals;
+        const fmt = (n) => (n >= 10000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+        // 复用本插件已有的 C.tag 与行内布局，不引入新的样式基元
+        const kv = (key, label, value) => h('div', { key, style: C.row }, [
+          h('div', { key: 'k', style: C.name }, label),
+          h('div', { key: 'v', style: { fontSize: 11, flex: '1 1 auto' } }, value),
+        ]);
+
         children.push(h('div', { key: 'us-h', style: C.h }, 'LLM 用量'));
         children.push(h('div', { key: 'us-sub', style: C.sub },
           '只统计人格插件自己发起的调用（事件判定、锚点解决检测），不含主对话。'));
 
-        const fmt = (n) => (n >= 10000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+        const head = [
+          h('span', { key: 'a', style: C.tag('normal') }, `调用 ${t.calls} 次`),
+        ];
+        if (t.failures > 0) {
+          head.push(h('span', { key: 'b', style: C.tag('mutation') }, `失败 ${t.failures}`));
+        }
+        head.push(h('span', {
+          key: 'c',
+          style: { fontSize: 10, opacity: 0.55 },
+        }, `运行 ${Math.round((t.uptimeMs ?? 0) / 60000)} 分钟`));
+
         children.push(h('div', { key: 'us-card', style: C.card }, [
-          h('div', { key: 'row', style: C.row }, [
-            h('span', { key: 'a', style: C.badge(t.calls > 0) }, `调用 ${t.calls} 次`),
-            t.failures > 0 ? h('span', { key: 'b', style: C.badge(false) }, `失败 ${t.failures}`) : null,
-            h('span', { key: 'c', style: { fontSize: 10, opacity: 0.6 } },
-              `运行 ${Math.round((t.uptimeMs ?? 0) / 60000)} 分钟`),
-          ].filter(Boolean)),
-          h(Row, { key: 'i', k: '输入', v: fmt(t.inputTokens) + ' tokens' }),
-          h(Row, { key: 'o', k: '输出', v: fmt(t.outputTokens) + ' tokens' }),
-          h(Row, { key: 't', k: '合计', v: fmt(t.totalTokens) + ' tokens' }),
+          h('div', { key: 'head', style: { marginBottom: 6 } }, head),
+          kv('i', '输入', fmt(t.inputTokens) + ' tokens'),
+          kv('o', '输出', fmt(t.outputTokens) + ' tokens'),
+          kv('t', '合计', fmt(t.totalTokens) + ' tokens'),
         ]));
 
-        // 分桶
         const bucketRows = Object.entries(usage.buckets ?? {})
           .filter(([, v]) => v.calls > 0)
           .map(([k, v]) => {
             const label = k === 'judge' ? '事件判定' : k === 'anchor-resolve' ? '锚点解决' : k;
-            return h(Row, {
-              key: k, k: label,
-              v: `${v.calls} 次 · ${fmt(v.totalTokens)} tokens${v.failures ? ` · ${v.failures} 失败` : ''}`,
-            });
+            return kv(k, label, `${v.calls} 次 · ${fmt(v.totalTokens)} tokens${v.failures ? ` · ${v.failures} 失败` : ''}`);
           });
         if (bucketRows.length > 0) {
           children.push(h('div', { key: 'us-b', style: C.card }, bucketRows));
         }
 
-        // 有没有统计不到的情况
         const missing = (usage.recent ?? []).filter((r) => r.missing).length;
         if (missing > 0) {
-          children.push(h('div', {
-            key: 'us-miss',
-            style: { ...C.sub, marginTop: 6 },
-          }, `注意：最近 ${missing} 次调用没有返回 usage —— 适配器未提供，这部分未计入。`));
+          children.push(h('div', { key: 'us-miss', style: { ...C.sub, marginTop: 6 } },
+            `注意：最近 ${missing} 次调用没有返回 usage —— 适配器未提供，这部分未计入。`));
         }
 
         children.push(h('div', { key: 'us-btn', style: C.row }, [

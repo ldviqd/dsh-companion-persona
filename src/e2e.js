@@ -21,7 +21,7 @@ import {
   appraise, initialState, step, describeChanges, renderPersona,
   evaluateExclusion, TRAIT_AXES, rest, TRUST_DECAY,
 } from './persona-core.js';
-import { ruleFilter, parseKind, toEpisode, createJudge, KINDS, reconcileValence } from './judge.js';
+import { ruleFilter, parseKind, toEpisode, createJudge, KINDS, reconcileValence, CLASSIFIER_PROMPT, parseJudgement } from './judge.js';
 import { createUsageMeter, collectStream } from './usage.js';
 import { appendLedger, checkRotation, MAX_BYTES, ROTATE_KEEP } from './ledger.js';
 import { extractSignals, inferEventKind } from './signals.js';
@@ -965,6 +965,52 @@ console.log('=== 14h. 判定诊断与词表 ===');
       `${(total / 1024 / 1024).toFixed(2)} MB，${files.length} 个文件`);
     check('轮转保留历史文件', files.some((f) => f.endsWith('.1')), files.join(','));
     await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 14i. 判定通道不是对话伙伴（v0.10.4）
+//
+//     实测事故：用户发「我要下班啦，乌拉」，判定通道返回
+//       "下班快乐！乌拉～收工顺利，路上注意安全…"
+//     模型把待分析文本当成对话对象回复了，导致解析失败 → 降级规则。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14i. 判定通道角色约束 ===');
+{
+  // prompt 必须显式否定"对话伙伴"身份
+  check('prompt 声明不是对话伙伴', CLASSIFIER_PROMPT.includes('不是对话伙伴'));
+  check('prompt 声明输入是数据', CLASSIFIER_PROMPT.includes('不是对你说的话'));
+  check('prompt 禁止回复用户', /绝对不要回复|不要回复/.test(CLASSIFIER_PROMPT));
+
+  // 角色约束必须在**类型说明之前**（前置权重高于末尾约束）
+  const guardAt = CLASSIFIER_PROMPT.indexOf('不是对话伙伴');
+  const typeAt = CLASSIFIER_PROMPT.indexOf('routine 闲聊寒暄');
+  check('角色约束在类型说明之前', guardAt >= 0 && guardAt < typeAt,
+    `guard@${guardAt} type@${typeAt}`);
+
+  // 保留原有的详细类型说明（压缩会掉准确率）
+  check('保留完整类型说明', CLASSIFIER_PROMPT.includes('support 感谢肯定'));
+  check('保留效价判断要点', CLASSIFIER_PROMPT.includes('反讽'));
+
+  // 补上日常起居分类（旧版缺，导致"下班"被判 achievement）
+  check('日常起居归 routine 有明确指引',
+    /下班.*routine|routine.*下班/.test(CLASSIFIER_PROMPT));
+
+  // 解析层容错：即使模型多说了一句，也能从噪声里取出标签
+  {
+    const noisy = '下班快乐！乌拉～收工顺利！\nkind=routine\nvalence=0.5';
+    const p1 = parseJudgement(noisy);
+    check('带噪声输出仍能解析出 kind', p1.kind === 'routine', String(p1.kind));
+    check('带噪声输出仍能解析出 valence', p1.valence === 0.5, String(p1.valence));
+  }
+
+  // 完全无标签时应返回 null（触发降级，而非伪造结果）
+  {
+    const pure = '下班快乐！乌拉～收工顺利，路上注意安全！';
+    const p2 = parseJudgement(pure);
+    check('纯回复输出返回 null（触发降级）', p2.kind === null, String(p2.kind));
   }
 }
 

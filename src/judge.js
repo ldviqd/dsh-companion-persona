@@ -144,19 +144,58 @@ export function parseJudgement(raw) {
   // kind 优先取 `kind=xxx` 显式标注 —— 否则 parseKind 会被前缀词 "kind" 干扰
   // （它把 = 换成空格后，"kind achievement" 里 "kind" 会先被当成候选）
   const labeledKind = raw.match(/kind\s*[=:]\s*([a-z]+)/i);
-  const kind = labeledKind
+  let kind = labeledKind
     ? (VALID_KIND.has(labeledKind[1].toLowerCase()) ? labeledKind[1].toLowerCase() : parseKind(raw))
     : parseKind(raw);
 
+  // 最后的安全网：模型偶尔会用中文标签（"类型: 闲聊"）。
+  // 正常路径用不到（prompt 明确要求英文标签），但一旦发生，
+  // 不救回来就整条降级 —— 而降级意味着用词典猜，准确率差得多。
+  if (kind === null) {
+    kind = KIND_ALIAS_ZH(raw);
+  }
+
   // 优先取 `valence=` 显式标注；没有则退回"文本里唯一的数字"
+  //
+  // 同时接受中文标注（"效价: 0.5"）—— 模型偶尔会用中文写标签名。
   let valence = null;
-  const labeled = raw.match(/valence\s*[=:]\s*(-?\d+(?:\.\d+)?)/i);
-  const numMatch = labeled ?? raw.match(/(?:^|\s)(-?\d+\.\d+)(?:\s|$)/);
+  const labeled = raw.match(/(?:valence|效价)\s*[=:：]\s*(-?\d+(?:\.\d+)?)/i);
+  const numMatch = labeled
+    ?? raw.match(/(?:^|\s)(-?\d+\.\d+)(?:\s|$)/)
+    ?? raw.match(/[：:]\s*(-?\d+(?:\.\d+)?)/);   // "效价：-0.3" 全角冒号场景
   if (numMatch) {
     const v = parseFloat(numMatch[1]);
     if (Number.isFinite(v)) valence = Math.max(-1, Math.min(1, v));
   }
   return { kind, valence };
+}
+
+/**
+ * 中文标签 → 标准 kind 的兜底映射。
+ *
+ * 为什么需要：模型偶尔无视英文标签要求，返回「类型: 闲聊」这种。
+ * 不救回来就要走降级（词典猜），而词典在大部分语境下不准。
+ *
+ * 只做**明确匹配**，不做猜测 —— 认不出就返回 null，让上层降级，
+ * 而不是硬塞一个可能错的标签。
+ */
+const KIND_ZH = [
+  [/(闲[聊谈]|日常|寒[暄暄]|应[答声])/, 'routine'],
+  [/(疏[远离]|冷[淡漠]|回避|敷[衍衍])/, 'distance'],
+  [/(争[执吵]|不[满悦]|冲[突])/, 'conflict'],
+  [/(道[歉歉]|和[解好]|修[复补])/, 'repair'],
+  [/(感[谢激]|肯[定]|支[持]|夸[奖赞])/, 'support'],
+  [/(示[弱]|亲[密]|私[事]|脆[弱])/, 'intimacy'],
+  [/(成[就]|好消[息]|喜[事]|开心的事)/, 'achievement'],
+  [/(背[叛]|欺[骗]|隐[瞒])/, 'betrayal'],
+  [/(丧[失]|失[去]|去[世]|永[别])/, 'loss'],
+];
+
+function KIND_ALIAS_ZH(raw) {
+  for (const [re, k] of KIND_ZH) {
+    if (re.test(raw)) return k;
+  }
+  return null;
 }
 
 export function parseKind(raw) {

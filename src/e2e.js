@@ -1015,6 +1015,49 @@ console.log('=== 14i. 判定通道角色约束 ===');
 }
 
 // ---------------------------------------------------------------------------
+// 14j. 解析宽容度（v0.10.5）
+//
+//     目标：模型只要给出了可辨认的答案，就不该因格式差异掉进降级。
+//     降级的代价是用词典猜，准确率差得多。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14j. 解析宽容度 ===');
+{
+  const cases = [
+    // [原始输出, 期望 kind, 期望 valence, 说明]
+    ['kind=routine\nvalence=0.5', 'routine', 0.5, '标准格式'],
+    ['这是一句闲聊。\nkind=routine\nvalence=0.5', 'routine', 0.5, '带前言'],
+    ['**kind=routine**\n**valence=0.5**', 'routine', 0.5, 'markdown'],
+    ['kind = routine\nvalence = 0.5', 'routine', 0.5, '带空格'],
+    ['valence=0.5\nkind=routine', 'routine', 0.5, '顺序颠倒'],
+    ['ROUTINE / 0.5', 'routine', 0.5, '大写'],
+    ['类型: 闲聊\n效价: 0.5', 'routine', 0.5, '中文标签'],
+    ['类型：疏远\n效价：-0.3', 'distance', -0.3, '中文标签+负效价'],
+    ['类型: 感谢\n效价: 0.8', 'support', 0.8, '中文标签'],
+    ['类型: 丧失\n效价: -0.9', 'loss', -0.9, '中文标签'],
+  ];
+  let ok = 0;
+  const fails = [];
+  for (const [raw, wantK, wantV, label] of cases) {
+    const p = parseJudgement(raw);
+    const pass = p.kind === wantK && (wantV === null || Math.abs((p.valence ?? 99) - wantV) < 0.01);
+    if (pass) ok++;
+    else fails.push(`${label}→${p.kind}/${p.valence}`);
+  }
+  check('各种格式都能解析出正确标签', ok === cases.length,
+    fails.length ? '失败:' + fails.join(',') : `${ok}/${cases.length}`);
+
+  // 真正无标签时必须返回 null（不能瞎猜）
+  check('无任何标签时返回 null',
+    parseJudgement('下班快乐！乌拉～收工顺利！').kind === null);
+
+  // 中文兜底不能瞎猜：认不出的中文描述应返回 null
+  check('认不出的中文描述不硬塞标签',
+    parseJudgement('这句话我判断不了').kind === null);
+}
+
+// ---------------------------------------------------------------------------
 // 15. 角色设定（v0.7）
 //
 //     之前 renderPersona 只输出"性情还没有明显变化"，等于告诉模型"你没有性格"，

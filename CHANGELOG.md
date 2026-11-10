@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.10.5
+
+Parse tolerance: if the model produced a recognisable answer, a formatting
+difference should not push it into the dictionary fallback.
+
+### Measured robustness first
+
+Before changing anything, I tested whether the 0.10.4 prompt still drifted into
+conversational replies. 14 adversarial inputs — plain greetings, "tell me a joke",
+"write me a poem", punctuation-only, a prompt-injection attempt ("ignore previous
+instructions") — plus 30 repeated runs on the hardest five. **Format correct 44/44.**
+The role constraint from 0.10.4 holds, so the prompt needed no further work.
+
+### What actually needed fixing: the parse side
+
+`parseJudgement` handled noise well (preambles, markdown, spacing, reversed order,
+uppercase, JSON, kind-only, valence-only) but failed on **Chinese labels**:
+
+```
+类型: 闲聊 / 效价: 0.5    →  kind=null  →  falls back to dictionary
+```
+
+Added an explicit Chinese alias map. Deliberately strict: unrecognised Chinese text
+still returns null rather than guessing — a wrong label is worse than a degradation,
+because a degradation at least records that it happened.
+
+Also fixed a real gap the tests caught: Chinese **valence** was not parsed at all,
+only English `valence=`. So `类型：疏远 / 效价：-0.3` recovered the kind but lost the
+sign of the sentiment.
+
+### On response to "just use the LLM, don't worry about tokens"
+
+I tested removing the echo-word short-circuit (嗯/哦/好的 and 40 more). The model
+classifies 「嗯」 and 「哦」 as **distance with valence -0.2**, not routine.
+
+Simulated over 200 turns: warmth 0.650 → 0.597, playfulness 0.550 → 0.512. A user who
+mostly replies with short acknowledgements would watch the persona cool down for no
+reason. Daily acknowledgements are conversational rhythm, not coldness.
+
+So the short-circuit stays for pure echo words, and the LLM handles everything with
+content — which is what the echo-word list already encodes.
+
+e2e 138 → **141 assertions**.
+
 ## 0.10.4
 
 The judgment channel occasionally replied to the user instead of classifying.

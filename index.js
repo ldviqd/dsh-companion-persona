@@ -657,6 +657,14 @@ export async function apply(ctx, config) {
         // 证据：原始用户发言（截断，避免把全文灌进审计）
         evidence: text.slice(0, 200),
         source: verdict.source,
+        // 判定诊断：出问题时能直接看出"是模型判的、缓存的、还是降级兜底的"。
+        // 早先只记 source，看不到失败原因 —— 一句明显夸赞被判 routine 时，
+        // 要翻遍日志和源码才能确认是模型调用失败。
+        judge: {
+          reason: verdict.reason ?? null,
+          degraded: verdict.degraded === true,
+          valenceSource: verdict.valence === null || verdict.valence === undefined ? 'dictionary' : 'model',
+        },
       }).catch?.(() => {});
     }
 

@@ -23,6 +23,7 @@ import {
 } from './persona-core.js';
 import { ruleFilter, parseKind, toEpisode, createJudge, KINDS, reconcileValence } from './judge.js';
 import { createUsageMeter, collectStream } from './usage.js';
+import { appendLedger, checkRotation, MAX_BYTES, ROTATE_KEEP } from './ledger.js';
 import { extractSignals, inferEventKind } from './signals.js';
 import {
   maybeCreateAnchor, selectRecall, markRecalled, renderRecall,
@@ -890,6 +891,80 @@ console.log('=== 14g. 审计修复回归 ===');
     // ③ 记账：markRecalled 延后到消费
     check('H3③: markRecalled 延后到消费之后',
       /pendingMarkBySession\s*=\s*new Map/.test(src));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 14h. 判定失败可见 + 词表覆盖 + 日志轮转（v0.10.3）
+//
+//     起因：一句明显夸赞「鲸鲸最棒，怎么会嫌弃」被判 routine。
+//     查下来是模型调用失败 → 降级规则 → 词典不认识「最棒」。
+//     三件事都必须修：失败要被看见、词表要够、日志要能轮转。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14h. 判定诊断与词表 ===');
+{
+  // --- ① 失败时带出原因与降级标记 ---
+  {
+    const j = createJudge({ classify: async () => { throw new Error('simulated network failure'); } });
+    const v = await j.judge('鲸鲸最棒，怎么会嫌弃');
+    check('失败时 source=fallback', v.source === 'fallback', v.source);
+    check('失败时标记 degraded', v.degraded === true, String(v.degraded));
+    check('失败时带出原因', typeof v.reason === 'string' && v.reason.includes('model-error'),
+      String(v.reason).slice(0, 50));
+  }
+
+  // --- ② 输出无法解析时也要带原因 ---
+  {
+    const j = createJudge({ classify: async () => 'garbage that is not a label' });
+    const v = await j.judge('随便一句话');
+    check('输出混乱时标记 unparsable', String(v.reason).includes('unparsable'),
+      String(v.reason).slice(0, 40));
+  }
+
+  // --- ③ 词表覆盖：那句原话在降级路径下也必须判成正面 ---
+  {
+    const t = '鲸鲸最棒，怎么会嫌弃';
+    const sig = extractSignals(t);
+    check('「最棒」被识别为正面', sig.valence > 0.5, sig.valence.toFixed(2));
+    check('降级路径不把夸赞判成 routine',
+      inferEventKind(sig, t) !== 'routine', inferEventKind(sig, t));
+  }
+
+  // --- ④ 常见夸赞词形覆盖 ---
+  {
+    const praise = [
+      '你最棒了', '太棒了', '好棒', '棒极了', '你最好', '你超好', '你很强',
+      '牛逼', '绝了', '我服了', '信得过', '靠你了', '你懂我', '幸亏有你',
+      '辛苦了', '感谢你', '想你了', '真棒', '厉害', '靠谱',
+    ];
+    const missed = praise.filter((t) => extractSignals(t).valence <= 0.05);
+    check('常见夸赞词形全覆盖', missed.length === 0,
+      missed.length ? '漏:' + missed.join(',') : `${praise.length} 条全中`);
+  }
+
+  // --- ⑤ 日志轮转：写入超过上限后受控 ---
+  {
+    const { mkdtemp, rm, readdir, stat } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = await mkdtemp(join(tmpdir(), 'ledger-rot-'));
+    const file = join(dir, 'ledger.jsonl');
+    const payload = 'x'.repeat(4000);
+    for (let i = 0; i < 1600; i++) {
+      await appendLedger(file, { at: Date.now(), kind: 'test', evidence: payload });
+      if (i % 500 === 0) await checkRotation(file);
+    }
+    await checkRotation(file);
+    const files = await readdir(dir);
+    const total = (await Promise.all(
+      files.map(async (f) => (await stat(join(dir, f))).size),
+    )).reduce((a, b) => a + b, 0);
+    check('日志轮转后总量受控', total < MAX_BYTES * (ROTATE_KEEP + 1),
+      `${(total / 1024 / 1024).toFixed(2)} MB，${files.length} 个文件`);
+    check('轮转保留历史文件', files.some((f) => f.endsWith('.1')), files.join(','));
+    await rm(dir, { recursive: true, force: true });
   }
 }
 

@@ -133,6 +133,41 @@ window.__ModuleLoader__.load({
     };
     const AXIS_ORDER = ['warmth', 'volatility', 'guardedness', 'playfulness', 'dependence'];
 
+    /**
+     * 判定来源徽标。
+     *
+     * 四种来源对可信度的影响完全不同：
+     *   模型  —— 正常路径，最可信
+     *   缓存  —— 同一句话之前判过，结果一致
+     *   规则  —— 应声词短路（嗯/哦），不值得调模型
+     *   兜底  —— **模型失败后的降级，可能完全不准**
+     *
+     * 只有兜底需要警示，其余用平静的小字标注即可。
+     */
+    function judgeBadge(row) {
+      const src = row.judge?.valenceSource;
+      const degraded = row.judge?.degraded === true;
+      if (!row.judge) return null;   // 旧记录没有诊断字段
+
+      const label = degraded ? '规则兜底'
+        : row.source === 'model' || row.source === 'llm' ? '模型'
+        : row.source === 'cache' ? '缓存'
+        : row.source === 'rule' ? '规则短路'
+        : row.source ? String(row.source) : null;
+      if (!label) return null;
+
+      return h('span', {
+        key: 'src',
+        title: src === 'dictionary' ? '效价由词典计算' : '效价由模型给出',
+        style: {
+          marginLeft: 6, fontSize: 9, padding: '1px 5px', borderRadius: 3,
+          background: degraded ? 'rgba(210,153,34,0.18)' : 'rgba(127,127,127,0.14)',
+          color: degraded ? '#d29922' : 'inherit',
+          opacity: degraded ? 1 : 0.6,
+        },
+      }, label);
+    }
+
     /** 一根轴：当前值 + 基线刻度 */
     function AxisBar({ axis, value, baseline }) {
       return h('div', { style: C.row }, [
@@ -755,7 +790,32 @@ window.__ModuleLoader__.load({
             h('div', { key: 'top' }, [
               h('span', { key: 'k', style: C.tag(mut ? 'mutation' : 'drift') }, row.kind || '?'),
               h('span', { key: 't', style: { opacity: 0.6 } }, at),
-            ]),
+              // 判定来源：出问题时一眼看出这次是模型判的、缓存的，还是降级兜底的。
+              //
+              // 之前只显示 kind 和 evidence —— 一句明显夸赞被判 routine 时，
+              // 看不出"是真的中性"还是"模型失败了退回规则"，
+              // 要翻 ledger 原始 JSON 才能确认。
+              judgeBadge(row),
+            ].filter(Boolean)),
+
+            // 降级时给出明确警告：结果可能不准
+            row.judge?.degraded
+              ? h('div', {
+                  key: 'deg',
+                  style: {
+                    marginTop: 4, padding: '4px 8px', borderRadius: 5, fontSize: 10,
+                    background: 'rgba(210,153,34,0.12)',
+                    border: '1px solid rgba(210,153,34,0.3)',
+                    lineHeight: '15px',
+                  },
+                }, [
+                  h('div', { key: 'h', style: { fontWeight: 600 } }, '⚠ 规则兜底（模型判定失败）'),
+                  h('div', { key: 'r', style: { opacity: 0.75, marginTop: 2 } },
+                    row.judge.reason ? String(row.judge.reason).slice(0, 90) : '原因未记录'),
+                  h('div', { key: 's', style: { opacity: 0.6, marginTop: 2 } },
+                    '这一条的事件类型和效价由关键词规则推定，可能不准。'),
+                ])
+              : null,
             mut
               ? h('div', { key: 'm', style: { marginTop: 4, color: '#d29922' } },
                   `★ 突变：${Object.entries(mut.delta || {}).map(([k, v]) => `${AXIS_LABEL[k] || k} ${v > 0 ? '+' : ''}${v}`).join('，')}`)

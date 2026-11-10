@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.10.3
+
+A praise message was classified `routine`. Three separate defects, all confirmed.
+
+「鲸鲸最棒，怎么会嫌弃」showed up in the panel as `routine`. Re-running the same
+judgment by hand returned `support / 0.8` — the model was fine. The ledger had the
+answer: `source: fallback`.
+
+### 1. Judgment failures were invisible
+
+When the model call failed, `judge()` fell back to keyword rules and recorded only
+`logger.warn` — and the DSH process log belongs to root, so a user could not read
+it. The panel showed `routine` with nothing to distinguish "genuinely neutral" from
+"the model failed and rules guessed".
+
+Ledger records now carry a `judge` block:
+
+```json
+{
+  "source": "fallback",
+  "judge": {
+    "reason": "model-error: ...",
+    "degraded": true,
+    "valenceSource": "dictionary"
+  }
+}
+```
+
+`judge()` distinguishes the two failure modes (`model-error` vs `unparsable-output`)
+and returns the reason instead of only logging it.
+
+### 2. The positive word list missed word forms, not word meanings
+
+48 common praise expressions, 28 unrecognised (58%). The pattern: the list had
+「真棒」 but not 「最棒」, 「厉害」 but not 「好厉害」. Chinese praise is built from
+degree adverbs plus a root, so recording roots alone misses most real usage.
+
+Added ~55 entries covering 最棒/太棒/好棒/棒极了/你最好/你超好/好厉害/服了你/信得过/
+靠你了/你懂我/幸亏有你/辛苦了/感谢你/想你了 etc.
+
+Result: 34/34 recognised, and 「鲸鲸最棒，怎么会嫌弃」 now scores valence 0.95 and
+classifies as `achievement` **even on the fallback path**.
+
+### 3. The ledger never rotated
+
+Append-only with no size bound. At ~350 bytes per turn and 200 turns a day that is
+70 KB a day — not alarming, but unbounded and increasingly slow to read.
+
+Now rotates at 2 MB, keeping 2 generations (`ledger.jsonl.1`, `.2`), checking size
+every 20 writes rather than on every append. Ceiling is 6 MB.
+
+Verified: 6.4 MB written → 4.17 MB on disk across 3 files.
+
+### A hypothesis that was wrong
+
+I first suspected `maxTokens: 16` was truncating the output. Tested at 16 / 32 / 64:
+all returned `finish=stop` with complete output. `kind=support\nvalence=0.8` is about
+12 tokens. Not the cause — recorded here so nobody re-investigates it.
+
+e2e 119 → **128 assertions**.
+
 ## 0.10.2
 
 Independent audit fixes. Seven confirmed defects, each reproduced before being fixed.

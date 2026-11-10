@@ -230,6 +230,8 @@ export function createJudge({ classify, cacheSize = 512, logger } = {}) {
    * @returns {Promise<{kind:string, source:'rule'|'cache'|'llm'|'fallback', reason:string}>}
    */
   async function judge(text) {
+    /** 判定失败时的原因（成功时保持 null），随返回值一起给出 */
+    let failReason = null;
     // 规则只做**短路优化**，不再抢占判定权（v0.9）
     //
     // 原实现让规则优先：命中即返回，模型根本没机会看这句话。
@@ -275,9 +277,15 @@ export function createJudge({ classify, cacheSize = 512, logger } = {}) {
         return { kind, valence, source: 'llm', reason: 'model' };
       }
       stats.failures++;
+      // 把失败原因带回返回值，让调用方能写进 ledger。
+      // 早先只 logger.warn —— 而 DSH 进程日志是 root 拥有的，用户读不到，
+      // 导致"判定降级了"这件事完全不可查（实测踩过：一句明显夸赞被判 routine，
+      // 查了半天才发现是模型调用失败，却不知道失败原因）。
+      failReason = `unparsable-output: ${String(raw).slice(0, 60)}`;
       logger?.warn?.(`[persona] 模型输出无法识别为标签: ${String(raw).slice(0, 40)}`);
     } catch (err) {
       stats.failures++;
+      failReason = `model-error: ${String(err?.message ?? err).slice(0, 120)}`;
       logger?.warn?.(`[persona] 事件判定失败，降级为规则: ${String(err?.message ?? err).slice(0, 100)}`);
     }
 
@@ -288,7 +296,13 @@ export function createJudge({ classify, cacheSize = 512, logger } = {}) {
     // 所以降级路径**先过一遍保守规则**，只在明确负性时才接受 distance。
     stats.fallbacks++;
     const fallbackKind = conservativeFallback(key);
-    return { kind: fallbackKind, source: 'fallback', reason: 'llm-unavailable' };
+    return {
+      kind: fallbackKind,
+      source: 'fallback',
+      reason: failReason ?? 'llm-unavailable',
+      /** 降级标记：面板据此显示"规则兜底，可能不准" */
+      degraded: true,
+    };
   }
 
   return { judge, stats, clearCache: () => cache.clear() };

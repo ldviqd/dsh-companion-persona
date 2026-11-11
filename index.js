@@ -246,7 +246,12 @@ export async function apply(ctx, config) {
   function pickRoute(agentHint) {
     // 1) 显式配置优先（用户想固定判定通道时用）
     if (config.judgeProvider && config.judgeModel) {
-      return { provider: config.judgeProvider, model: config.judgeModel };
+      // 判定通道固定为 none：这是分类任务，推理链只会让模型跑偏
+      return {
+        provider: config.judgeProvider,
+        model: config.judgeModel,
+        reasoningEffort: 'none',
+      };
     }
     // 2) 当前 session 所属 agent 的路由
     const sid = typeof agentHint === 'string' ? agentHint : agentHint?.sessionId;
@@ -277,8 +282,19 @@ export async function apply(ctx, config) {
         model: route.model,
         system: CLASSIFIER_PROMPT,
         messages: [{ role: 'user', content: [{ type: 'text', text }] }],
-        maxTokens: 16,
+        // maxTokens 给足：不开思考时约 12 token，但适配器若忽略 effort
+        // 设置、仍产生 reasoning，16 会被推理吃掉导致 content 为空。
+        maxTokens: 64,
         temperature: 0,
+        // ⚠️ 必须显式关掉思考。
+        //
+        // 实测（2026-11-11）：不传 reasoningEffort 时，模型产生 500-1600 字推理，
+        // 然后开始**评论待分类的内容**而不是给标签：
+        //   "确实，这比'没人签字'更麻烦：签字本来是审核、确认和担责…"
+        // 这类输出解析不出标签，整条降级到词典。
+        //
+        // 分类任务不需要推理链 —— 关掉后 reasoning=0，输出稳定为两行标签。
+        reasoningEffort: 'none',
       });
       // collectStream 顺带捕获 { type:'usage' } chunk —— 只统计本插件的调用，
       // 与 DSH 全局用量分开，才能看出"人格功能花了多少"。
@@ -589,8 +605,11 @@ export async function apply(ctx, config) {
                 model: route.model,
                 system: RESOLVE_PROMPT.replace('{ANCHOR}', anchor.summary),
                 messages: [{ role: 'user', content: [{ type: 'text', text: txt }] }],
-                maxTokens: 12,
+                maxTokens: 48,
                 temperature: 0,
+                // 同 judge：分类任务不需要推理链。不关思考会开始评论内容，
+                // 输出解析不出标签 → 退回规则 → 误把锚点判成已解决（不可恢复）。
+                reasoningEffort: 'none',
               });
               const out = await collectStream(chunks, (usage) => {
                 usageMeter.record('anchor-resolve', usage, {

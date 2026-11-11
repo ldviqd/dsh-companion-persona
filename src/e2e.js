@@ -1123,6 +1123,50 @@ console.log('=== 14k. 真实语料反馈 ===');
 }
 
 // ---------------------------------------------------------------------------
+// 14l. 判定调用必须关闭思考（v0.10.7）
+//
+//     实测事故：面板连续两条 unparsable-output，模型输出是
+//       "确实，这比'没人签字'更麻烦：签字本来是审核、确认和担责…"
+//     —— 它在**评论待分类的内容**，而不是给标签。
+//
+//     根因：ctx.llm.stream() 没传 reasoningEffort，DSH 用了默认值（开思考）。
+//     模型产生 500-1600 字推理后跑偏成对话。分类任务不需要推理链。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14l. 判定调用关闭思考 ===');
+{
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+
+  // 两个调用点都必须显式关闭。
+  //
+  // 注意排除注释里的提及：有些说明文字会写 "ctx.llm.stream({provider:'', model:''})"，
+  // 正则要把 `const chunks = ctx.llm.stream(` 这种真实调用和注释区分开。
+  const calls = [...src.matchAll(/const chunks = ctx\.llm\.stream\(\{[\s\S]*?\}\)/g)]
+    .map((m) => m[0]);
+  check('有两个真实 LLM 调用点', calls.length === 2, `${calls.length} 个`);
+
+  let guarded = 0;
+  for (const c of calls) {
+    if (/reasoningEffort:\s*'none'/.test(c)) guarded++;
+  }
+  check('每个调用点都关闭了思考', guarded === calls.length,
+    `${guarded}/${calls.length}`);
+
+  // maxTokens 必须给足：开思考时 16 会被推理吃光，content 为空
+  let enough = 0;
+  for (const c of calls) {
+    const m = c.match(/maxTokens:\s*(\d+)/);
+    if (m && Number(m[1]) >= 48) enough++;
+  }
+  check('maxTokens 给足（≥48）', enough === calls.length, `${enough}/${calls.length}`);
+
+  // pickRoute 的显式配置分支也要带 none
+  check('显式判定路由带 none', /judgeModel,[\s\S]{0,120}reasoningEffort:\s*'none'/.test(src),
+    '固定判定通道时也应关闭思考');
+}
+
+// ---------------------------------------------------------------------------
 // 15. 角色设定（v0.7）
 //
 //     之前 renderPersona 只输出"性情还没有明显变化"，等于告诉模型"你没有性格"，

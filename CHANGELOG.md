@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.10.7
+
+Judgment was falling back to keyword rules on every turn. The cause was a missing
+parameter — the classifier was still thinking.
+
+### What the panel showed
+
+Two consecutive entries, both `unparsable-output`:
+
+```
+确实，这比"没人签字"更麻烦：签字本来是审核、确认和担责，结果变成"形式上
+有签名，实际上没人看"。AI生成的东西最多算底…
+```
+
+The model was **commenting on the text it was asked to classify**.
+
+### Root cause
+
+`ctx.llm.stream()` was called without `reasoningEffort`. The adapter fell back to
+the provider default, which enables reasoning. Measured on the two failing inputs:
+**500–1600 characters of reasoning** before the answer — and after that much
+deliberation the model drifted into discussing the content instead of labelling it.
+
+Reproduced directly: same prompt, same inputs, `reasoning_effort: 'none'` →
+`reasoning=0`, output is exactly the two expected lines, and latency drops from
+~3-4s to ~1s.
+
+This looked like a prompt problem for a while, and it was not. The 0.10.4 role
+constraint was working — it just cannot survive 1500 characters of self-directed
+reasoning.
+
+### Fix
+
+Both call sites (event judgment and anchor resolution) now pass
+`reasoningEffort: 'none'`, and `maxTokens` went from 16/12 to 64/48 so a backend
+that ignores the effort setting still cannot consume the whole budget with
+reasoning and return empty content.
+
+Classification is not a reasoning task. It maps one sentence to two labels.
+
+### Verified on the exact failing inputs
+
+```
+✅ conflict  v=-0.6  reasoning=0字  1426ms
+✅ routine   v=0     reasoning=0字   867ms
+✅ support   v=0.8   reasoning=0字  1231ms
+```
+
+### Test caught my own miss
+
+The first version of the regression test matched three call sites; the third was
+the string `ctx.llm.stream({...})` inside a doc comment. Tightened the pattern to
+`const chunks = ctx.llm.stream(` so comments cannot masquerade as guarded call
+sites.
+
+e2e 152 → **156 assertions**.
+
 ## 0.10.6
 
 Judged against 359 real user messages pulled from the session store. Two findings.

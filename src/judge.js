@@ -252,14 +252,25 @@ betrayal 欺骗背叛 / loss 失去永别
 
 效价：-1 到 1 的小数。-1 极度负面，0 中性，1 极度正面。
 
-判断效价时注意：
+**conflict 的判定标准（最容易误判）**：
+- conflict 需要**针对人的不满**：指责、抱怨对方的做法、表达被冒犯
+  （"你根本不懂""别敷衍我""我说了多少遍"）
+- **报告问题 / 提问 / 讨论分歧不算 conflict**：
+  「面板看不到，怎么回事」是求助 → routine
+  「我想支持你的观点，但是…」是理性讨论 → routine
+  「界面没恢复，我看不到输出」是陈述故障 → routine
+- 命令输出、日志、代码片段 → routine
+- 判断前先问：说话人是在**对谁不满**吗？不是的话就不是 conflict
+- **「烦死了」「气死我了」这类带强烈负面情绪词的抱怨 → conflict**（不是 intimacy）
+
+效价判断要点：
 - 反讽：「你可真行啊」「真是谢谢你啊」是负面
 - 亲昵的骂：「讨厌啦」「你这个笨蛋」可能偏正面
-- 敷衍：「行吧」「随你」「哦」轻微负面
+- 敷衍：「行吧」「随你」轻微负面
 - 陈述里出现情感词（"这本书讲怎么应对焦虑"）不算负面
 - 短句不等于疏远
 - 下班、吃饭、睡觉、告别等日常起居 → routine（不是 achievement）
-- 只有明确的好消息/成就（升职、通过考试、中奖）才 → achievement
+- 只有明确的好消息/成就才 → achievement
 
 只输出两行，不要解释：
 kind=类型
@@ -334,10 +345,27 @@ export function createJudge({ classify, cacheSize = 512, logger } = {}) {
       return { kind: cachedKind, valence: cachedValence, source: 'cache', reason: 'cached' };
     }
 
-    // LLM
+    // LLM（带一次短重试）
+    //
+    // 为什么加：实测批量判定时网关会短时限流（返回空、tokens=0、耗时 5-13ms）。
+    // 一次失败就降级到词典，而词典在真实语料上准头差得多。
+    // 重试一次能把这类瞬时故障挡掉，成本只是一次额外调用。
+    //
+    // 只重试一次、且退避很短：判定是异步旁路，拖太久没有意义。
     stats.calls++;
     try {
-      const raw = await classify(key);
+      let raw;
+      try {
+        raw = await classify(key);
+        // 空输出视为瞬时故障（网关限流时就是这样，不抛错但什么都不返回）
+        if (typeof raw === 'string' && raw.trim() === '') {
+          await new Promise((r) => setTimeout(r, 400));
+          raw = await classify(key);
+        }
+      } catch (firstErr) {
+        await new Promise((r) => setTimeout(r, 400));
+        raw = await classify(key);
+      }
       const { kind, valence } = parseJudgement(raw);
       if (kind) {
         stats.llmHits++;

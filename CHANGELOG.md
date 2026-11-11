@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.10.6
+
+Judged against 359 real user messages pulled from the session store. Two findings.
+
+### Format compliance is solid
+
+60-message sample: **100% parseable**, no replies, no drift out of the classifier
+role. The 0.10.4 role constraint plus the 0.10.5 Chinese-label fallback hold on real
+conversational input, not just synthetic cases. Average cost ~494 tokens, ~4.0s.
+
+### conflict was over-assigned, and the cause was the prompt
+
+15% of real messages came back `conflict`. All nine inspected:
+
+```
+我重启了，但是界面没有恢复，我看不到你输出了什么内容      reporting a fault
+设置面板里面看不到这个插件的面板哎，怎么回事呢            asking for help
+ldviqd@FNOS:~$ find /home/ldviqd/.config -name session.   command output
+你再看看                                              "take another look"
+我想支持你的观点，但是对于 agent-memory 是否实现了分层记忆有疑问   rational discussion
+```
+
+Not one is an actual conflict. The prompt listed `conflict 争执不满` with no
+criterion, so anything with mild negative sentiment or a "but" read as disagreement
+with the assistant.
+
+Added an explicit test — **is the speaker dissatisfied with a person?** — plus
+examples of what looks negative but is not. Result: misfires 2/7 -> **0/7**, true
+conflicts still 5/5.
+
+### One case needed a second rule
+
+`烦死了，一点进展都没有` came back `intimacy` after the first pass — read as venting.
+It is a complaint. Added: strong negative interjections (烦死了 / 气死我了) are
+conflict, not intimacy.
+
+That case already had a `CONFIDENT_RULES` entry, but since 0.9.0 rules only *suggest*
+— the model decides, and here it overrode the rule. So the signal has to live in the
+prompt too.
+
+### Verification
+
+22-case suite spanning the misfire set, true conflicts, and every previously-fixed
+case (反讽 / 日常起居 / 示弱 / 背叛 / 丧失): **22/22**.
+
+e2e 141 -> **142 assertions**.
+
 ## 0.10.5
 
 Parse tolerance: if the model produced a recognisable answer, a formatting

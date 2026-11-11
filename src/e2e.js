@@ -1058,6 +1058,71 @@ console.log('=== 14j. 解析宽容度 ===');
 }
 
 // ---------------------------------------------------------------------------
+// 14k. 真实语料验证的问题（v0.10.6）
+//
+//     用 359 条真实用户消息跑批量判定，暴露两个问题：
+//       ① conflict 过判（15%）：报告故障/提问/理性讨论被当成冲突
+//       ② 网关限流时无重试，一次失败就降级词典
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14k. 真实语料反馈 ===');
+{
+  // ① prompt 必须给出 conflict 的判定标准（这是过判的根因）
+  check('prompt 说明 conflict 需要针对人的不满',
+    /针对.{0,4}人.{0,4}不满|对谁不满/.test(CLASSIFIER_PROMPT));
+  check('prompt 明确报告问题不算 conflict',
+    /报告问题.{0,10}不算|求助.{0,6}routine/.test(CLASSIFIER_PROMPT)
+    || CLASSIFIER_PROMPT.includes('是求助'));
+  check('prompt 明确命令输出不算 conflict',
+    /命令输出|日志|代码片段/.test(CLASSIFIER_PROMPT));
+  check('prompt 明确强烈负面抱怨是 conflict 不是 intimacy',
+    /烦死了.{0,20}conflict|气死我了.{0,20}conflict/.test(CLASSIFIER_PROMPT));
+
+  // ② 判定失败要有一次重试，而不是立刻降级
+  {
+    let calls = 0;
+    const j = createJudge({
+      classify: async () => {
+        calls++;
+        // 第一次返回空（网关限流的典型表现），第二次正常
+        return calls === 1 ? '' : 'kind=support\nvalence=0.8';
+      },
+    });
+    const v = await j.judge('重试测试');
+    check('空响应会重试一次', calls === 2, `调用 ${calls} 次`);
+    check('重试成功后走模型路径', v.source === 'llm', v.source);
+    check('重试成功后不带降级标记', v.degraded !== true, String(v.degraded));
+  }
+
+  // 抛错也要重试
+  {
+    let calls = 0;
+    const j = createJudge({
+      classify: async () => {
+        calls++;
+        if (calls === 1) throw new Error('transient');
+        return 'kind=routine\nvalence=0';
+      },
+    });
+    const v = await j.judge('抛错重试测试');
+    check('抛错后会重试一次', calls === 2, `调用 ${calls} 次`);
+    check('抛错重试成功走模型路径', v.source === 'llm', v.source);
+  }
+
+  // 两次都失败才降级
+  {
+    let calls = 0;
+    const j = createJudge({
+      classify: async () => { calls++; throw new Error('always down'); },
+    });
+    const v = await j.judge('彻底失败测试');
+    check('两次都失败才降级', v.degraded === true, String(v.degraded));
+    check('降级时记录了失败原因', String(v.reason).includes('model-error'), String(v.reason).slice(0, 40));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 15. 角色设定（v0.7）
 //
 //     之前 renderPersona 只输出"性情还没有明显变化"，等于告诉模型"你没有性格"，

@@ -1217,6 +1217,22 @@ console.log('=== 14m. 判定通道切换 ===');
 
   // 模型列表获取失败不能拖垮整个 state
   check('模型列表失败时降级为空列表', /judgeError/.test(src));
+
+  // provider 清单必须动态获取，不能硬编码
+  check('provider 清单来自 listProviders', /ctx\.llm\.listProviders/.test(src));
+  check('不硬编码单个 provider', !/const providers = \['dsh-ofm'\]/.test(src));
+
+  // 下拉框 value 不能用 "provider/model" 拼接
+  //
+  // 实测过的 bug：模型 id 本身带斜杠（qodercn/dfmodel），
+  // 拼成 "dsh-ofm/qodercn/dfmodel" 再用 lastIndexOf('/') 切，
+  // 会得到 provider="dsh-ofm/qodercn" —— 不存在的路由，静默失败，
+  // 表现就是"下拉框选了但改不掉判定模型"。
+  check('下拉框 value 用索引而非拼接',
+    /value: `i:\$\{idx\}`/.test(client) || /value: 'i:'/.test(client),
+    '避免模型 id 里的斜杠干扰解析');
+  check('下拉框不再用 lastIndexOf 切分',
+    !/const idx = v\.lastIndexOf\('\/'\)/.test(client));
 }
 
 // ---------------------------------------------------------------------------

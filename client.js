@@ -481,17 +481,26 @@ window.__ModuleLoader__.load({
         const cur = data.judgeRoute;
         const eff = data.judgeEffective;
         const models = data.judgeModels ?? [];
-        const curKey = cur ? `${cur.provider}/${cur.model}` : '';
+        // 回显：按 provider+model 精确匹配，找不到就空（跟随）
+        const curIdx = cur
+          ? models.findIndex((m) => m.provider === cur.provider && m.model === cur.model)
+          : -1;
+        const curKey = curIdx >= 0 ? `i:${curIdx}` : '';
 
         children.push(h('div', { key: 'jr-h', style: C.h }, '事件判定通道'));
         children.push(h('div', { key: 'jr-sub', style: C.sub },
           '用哪个模型判断"这句话是什么类型的情感事件"。判定走异步旁路，不影响对话速度。'));
 
         const options = [h('option', { key: '__follow', value: '' }, '跟随会话模型')];
-        for (const m of models) {
+        for (const [idx, m] of models.entries()) {
           options.push(h('option', {
             key: `${m.provider}/${m.model}`,
-            value: `${m.provider}/${m.model}`,
+            // 用索引做 value，不用 "provider/model" 拼接。
+            //
+            // 原因：模型 id 本身常带斜杠（qodercn/dfmodel、trae/deepseek-v4.1-flash），
+            // 拼成 "dsh-ofm/qodercn/dfmodel" 后再用 lastIndexOf('/') 切，
+            // 会得到 provider="dsh-ofm/qodercn" —— 一个不存在的路由，静默失败。
+            value: `i:${idx}`,
           }, m.name && m.name !== m.model ? `${m.name}` : m.model));
         }
 
@@ -507,10 +516,13 @@ window.__ModuleLoader__.load({
                   if (v === '') {
                     await callRpc('judge-route', { follow: true });
                   } else {
-                    const idx = v.lastIndexOf('/');
+                    // value 是 `i:<索引>`，从列表原样取回 provider/model，
+                    // 不做字符串切分 —— 模型 id 里的斜杠不会再造成误解析
+                    const picked = models[Number(String(v).slice(2))];
+                    if (!picked) throw new Error('选项已失效，请刷新');
                     await callRpc('judge-route', {
-                      provider: v.slice(0, idx),
-                      model: v.slice(idx + 1),
+                      provider: picked.provider,
+                      model: picked.model,
                     });
                   }
                   await load();

@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.10.10
+
+Two bugs made the judge-model dropdown unusable.
+
+### 1. Only one provider was listed
+
+The model list was built from a hardcoded single provider:
+
+```js
+const providers = ['dsh-ofm'];
+```
+
+The local Our Free Model plugin registers `our-free-model` and
+`our-free-model-region`, and the host reports 13 providers in total — the dropdown
+showed 7 models from one of them. Now uses `ctx.llm.listProviders()` and lists
+everything: 17 models across the reported providers.
+
+### 2. Selecting a model silently did nothing
+
+The option value was `provider/model`, and the change handler split it with
+`lastIndexOf('/')`. Model ids contain slashes themselves, so:
+
+```
+value "dsh-ofm/qodercn/dfmodel"
+  → provider "dsh-ofm/qodercn"   ← no such route
+  → model    "dfmodel"
+```
+
+The request went to a nonexistent provider, failed silently, and the channel never
+changed — which is exactly the symptom: pick a model, nothing happens.
+
+Fixed by keying options on their index (`i:<n>`) and reading `provider`/`model`
+straight off the list entry instead of parsing a compound string. Verified against
+ids containing slashes: `qodercn/dfmodel`, `trae/deepseek-v4.1-flash`,
+`our-free-model/openrouter/free`.
+
+### Also worth recording
+
+State lives at `$HOME/.dsh/companion/state.json`, where `HOME` is what the DSH
+*process* sees — not `DSH_HOME`. I spent a while reading a stale
+`$DSH_HOME/companion/state.json` from October and concluding writes were failing. They
+were not. Check the process environment before trusting a path.
+
+e2e 169 → **173 assertions**.
+
 ## 0.10.9
 
 The judgment channel is now visible and switchable from the panel.

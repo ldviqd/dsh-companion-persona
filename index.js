@@ -781,9 +781,16 @@ export async function apply(ctx, config) {
       // 所以单独 try 包住，失败就返回空列表（面板显示"无法获取"）。
       let judgeModels = [];
       let judgeError = null;
+      let judgeProviders = [];
       try {
-        const providers = ['dsh-ofm'];
-        for (const prov of providers) {
+        // provider 清单必须向 DSH 要，不能硬编码。
+        //
+        // 早先我写死了 ['dsh-ofm']，漏掉了本地 Our Free Model 插件提供的
+        // provider —— 用户界面上明明有那些模型，下拉框里却看不到。
+        // 正确 API 是 listProviders()，返回 [{id, name}]
+        const infos = ctx.llm.listProviders?.() ?? [];
+        judgeProviders = infos.map((p) => p.id).filter(Boolean);
+        for (const prov of judgeProviders) {
           const list = await ctx.llm.listModels?.(prov);
           if (Array.isArray(list)) {
             for (const m of list) {
@@ -808,6 +815,7 @@ export async function apply(ctx, config) {
             ? { provider: effectiveRoute.provider, model: effectiveRoute.model }
             : null,
           judgeModels,
+          judgeProviders,
           judgeError,
           identity: state.identity,
           traits: snapshot(state.traits),

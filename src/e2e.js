@@ -1213,7 +1213,9 @@ console.log('=== 14m. 判定通道切换 ===');
   const client = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
   check('面板有「跟随会话模型」选项', client.includes('跟随会话模型'));
   check('面板显示当前生效通道', client.includes('当前生效：'));
-  check('写死通道时给出风险提示', client.includes('已写死该通道'));
+  check('锁定通道时说明当前状态',
+    client.includes('已锁定') && client.includes('不会自动改用会话模型'));
+  check('提示里给出恢复方式', client.includes('跟随会话模型'));
 
   // 模型列表获取失败不能拖垮整个 state
   check('模型列表失败时降级为空列表', /judgeError/.test(src));

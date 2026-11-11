@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.10.11
+
+The pinned-channel notice read like an error.
+
+It said 「已写死该通道」 — "this channel has been hard-written" — which sounds like
+something went wrong. It is not an error; it is a statement that the user pinned a
+channel and automatic follow is off.
+
+Now it names the channel and says how to undo it:
+
+> 已锁定 qodercn/dfmodel。该通道不可用时会降级到关键词规则，不会自动改用会话模型；
+> 选「跟随会话模型」可恢复自动切换。
+
+The notice still appears only while a channel is pinned — that part was correct. My
+earlier reading that it was a stale leftover was wrong: `judgeRoute` holds
+`{qodercn, dfmodel}` because the user pinned it, and the panel was reporting the truth.
+
+e2e 173 → **174 assertions**.
+
 ## 0.10.10
 
 Two bugs made the judge-model dropdown unusable.

@@ -542,11 +542,16 @@ window.__ModuleLoader__.load({
             ? h('div', { key: 'none', style: { ...C.sub, marginTop: 4, marginBottom: 0 } },
                 '没有列出可选模型 —— 会回落到配置文件里的通道。')
             : null,
-          // 写死通道时提醒：该通道出问题判定会一直降级
+          // 锁定通道时说明当前状态与后果。
+          //
+          // 早先写的是「已写死该通道：它不可用时……」，"写死"读起来像出了故障，
+          // 实际只是"你选定了、不再自动切换"。改成陈述状态 + 说清如何恢复。
           cur
             ? h('div', {
                 key: 'pin', style: { ...C.sub, marginTop: 4, marginBottom: 0, opacity: 0.75 },
-              }, '已写死该通道：它不可用时判定会降级到关键词规则，而不会自动跟随会话模型。')
+              }, `已锁定 ${cur.provider}/${cur.model}。`
+                + '该通道不可用时会降级到关键词规则，不会自动改用会话模型；'
+                + '选「跟随会话模型」可恢复自动切换。')
             : null,
         ].filter(Boolean)));
       }

@@ -1179,6 +1179,47 @@ console.log('=== 14l. 判定调用关闭思考 ===');
 }
 
 // ---------------------------------------------------------------------------
+// 14m. 判定通道可切换（v0.10.9）
+//
+//     需求：要知道判定用的是哪个模型，并且能选。
+//     三级优先级：面板选择 > 配置文件 > 跟随会话模型。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14m. 判定通道切换 ===');
+{
+  // state 初始值：跟随会话模型
+  check('judgeRoute 默认为 null（跟随）',
+    initialState().judgeRoute === null, String(initialState().judgeRoute));
+
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+
+  // 三级优先级的存在性
+  check('pickRoute 读 state.judgeRoute', /const chosen = state\.judgeRoute/.test(src));
+  check('面板选择优先于配置',
+    src.indexOf('state.judgeRoute') < src.indexOf('config.judgeProvider'),
+    'judgeRoute 分支必须在 config 分支之前');
+
+  // 面板选择 / 配置 两条路径都必须关闭思考
+  check('选中的通道也关闭思考',
+    /chosen\.provider[\s\S]{0,200}reasoningEffort:\s*'off'/.test(src));
+
+  // 端到端下拉框契约
+  check('服务端有 judge-route 端点', /async 'judge-route'\(payload\)/.test(src));
+  check('state 返回 judgeRoute', /judgeRoute:\s*state\.judgeRoute/.test(src));
+  check('state 返回生效路由', /judgeEffective/.test(src));
+  check('state 返回可用模型列表', /judgeModels/.test(src));
+
+  const client = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
+  check('面板有「跟随会话模型」选项', client.includes('跟随会话模型'));
+  check('面板显示当前生效通道', client.includes('当前生效：'));
+  check('写死通道时给出风险提示', client.includes('已写死该通道'));
+
+  // 模型列表获取失败不能拖垮整个 state
+  check('模型列表失败时降级为空列表', /judgeError/.test(src));
+}
+
+// ---------------------------------------------------------------------------
 // 15. 角色设定（v0.7）
 //
 //     之前 renderPersona 只输出"性情还没有明显变化"，等于告诉模型"你没有性格"，

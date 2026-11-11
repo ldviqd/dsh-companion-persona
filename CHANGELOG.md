@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.10.9
+
+The judgment channel is now visible and switchable from the panel.
+
+### The question it answers
+
+Until now the answer required reading source: it depends. `pickRoute` had a
+three-level priority — explicit config first, then the session's own agent route, then
+any known agent. With `judgeProvider`/`judgeModel` set (as they were here), it was
+**pinned**: changing the model in the chat window had no effect on judgment. With both
+empty, it **follows the session**.
+
+That is not a distinction a user should have to discover by reading code, and the
+pinned mode has a real failure mode: if that one channel breaks, judgment degrades to
+keyword rules forever while the main conversation keeps working.
+
+### What changed
+
+`state.judgeRoute` holds the panel selection, resolved ahead of config:
+
+```
+panel selection  >  config file  >  follow the session model
+```
+
+- `null` (default) → follow, unchanged from before
+- `{provider, model}` → pin that channel
+
+Stored in state rather than config so switching takes effect immediately — no restart
+to try a different judge model.
+
+### Panel
+
+A dropdown with "跟随会话模型" at the top followed by every model the host reports,
+plus the currently effective route spelled out beneath it. When a channel is pinned the
+panel says so:
+
+> 已写死该通道：它不可用时判定会降级到关键词规则，而不会自动跟随会话模型。
+
+Model listing is wrapped in its own try/catch — a failure returns an empty list and
+`judgeError` rather than taking down the whole state response.
+
+### Note
+
+Pinned channels also get `reasoningEffort: 'off'`, same as the config path. Without it
+the classifier thinks, and thinking makes it comment on the text instead of labelling it
+(see 0.10.7/0.10.8).
+
+e2e 157 → **169 assertions**.
+
 ## 0.10.8
 
 The reasoning-disable fix in 0.10.7 did not work. The value was wrong.

@@ -251,6 +251,18 @@ export function initialState(overrides = {}) {
     identity: { name: '', userName: '', role: DEFAULT_ROLE },
     enabled: { inject: true, evolve: true, anchor: true },
     /**
+     * 判定通道选择（面板可改，持久化在这里而不是 config）。
+     *
+     * 语义：
+     *   null / undefined  → 跟随会话模型（用 agent.options 的 provider/model）
+     *   { provider, model } → 写死这个通道
+     *
+     * 为什么放在 state 而不是 config：config 改了要重启，而"换一个判定模型"
+     * 属于调参，应该即时生效。config 里的 judgeProvider/judgeModel 保留为
+     * 首次初始化的默认值。
+     */
+    judgeRoute: null,
+    /**
      * 排除规则：让某些会话不参与人格形成。
      *
      * 为什么需要：人格应该只由"和这个人的关系"塑造。但同一个 DSH 里还会跑

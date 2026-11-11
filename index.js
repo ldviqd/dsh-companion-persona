@@ -244,9 +244,23 @@ export async function apply(ctx, config) {
 
   /** 解析本次判定该用哪个路由：显式配置 > 当前 agent > 任意已知 agent > 让宿主默认 */
   function pickRoute(agentHint) {
+    // 0) 面板选择优先 —— 用户在界面上选的判定通道
+    //
+    // null 表示「跟随会话模型」，此时继续往下走到 ②/③。
+    // 这一层放在 config 之前，是为了让「换判定模型」即时生效，不用改配置重启。
+    const chosen = state.judgeRoute;
+    if (chosen && chosen.provider && chosen.model) {
+      return {
+        provider: chosen.provider,
+        model: chosen.model,
+        reasoningEffort: 'off',
+      };
+    }
+
     // 1) 显式配置优先（用户想固定判定通道时用）
     if (config.judgeProvider && config.judgeModel) {
-      // 判定通道固定为 none：这是分类任务，推理链只会让模型跑偏
+      // 判定通道固定为 off：这是分类任务，推理链只会让模型跑偏
+      // （注意取值必须是 off —— pi-ai 的合法档位里没有 none）
       return {
         provider: config.judgeProvider,
         model: config.judgeModel,
@@ -760,11 +774,41 @@ export async function apply(ctx, config) {
   const handlers = {
     async state() {
       const changed = describeChangesForPanel(state);
+
+      // 判定通道：当前选择 + 可用模型清单
+      //
+      // 只有 provider 非空时才能列模型；列不出来不该让整个 state 失败，
+      // 所以单独 try 包住，失败就返回空列表（面板显示"无法获取"）。
+      let judgeModels = [];
+      let judgeError = null;
+      try {
+        const providers = ['dsh-ofm'];
+        for (const prov of providers) {
+          const list = await ctx.llm.listModels?.(prov);
+          if (Array.isArray(list)) {
+            for (const m of list) {
+              judgeModels.push({ provider: prov, model: m.id, name: m.name ?? m.id });
+            }
+          }
+        }
+      } catch (err) {
+        judgeError = String(err?.message ?? err).slice(0, 120);
+      }
+
+      const effectiveRoute = pickRoute(null);
       return {
         ok: true,
         value: {
           /** 本插件自己的 LLM 用量（不含主对话） */
           usage: usageMeter.snapshot(),
+          /** 判定通道：null=跟随会话，{provider,model}=写死 */
+          judgeRoute: state.judgeRoute ?? null,
+          /** 当前实际生效的判定路由 */
+          judgeEffective: effectiveRoute
+            ? { provider: effectiveRoute.provider, model: effectiveRoute.model }
+            : null,
+          judgeModels,
+          judgeError,
           identity: state.identity,
           traits: snapshot(state.traits),
           baseline: state.baseline,
@@ -819,6 +863,46 @@ export async function apply(ctx, config) {
     async 'reset-usage'() {
       usageMeter.reset();
       return { ok: true, value: usageMeter.snapshot() };
+    },
+    /**
+     * 设置判定通道。
+     *
+     * payload: { provider, model } 写死；或 { follow: true } 恢复跟随会话。
+     */
+    async 'judge-route'(payload) {
+      const follow = payload?.follow === true
+        || payload?.provider === ''
+        || payload?.provider === null;
+
+      const next = follow
+        ? null
+        : (() => {
+            const provider = String(payload?.provider ?? '').trim();
+            const model = String(payload?.model ?? '').trim();
+            if (!provider || !model) return undefined;
+            return { provider, model };
+          })();
+
+      if (next === undefined) {
+        return { ok: false, error: { message: 'provider 和 model 都需要提供' } };
+      }
+
+      const before = state.judgeRoute ?? null;
+      const same = JSON.stringify(before) === JSON.stringify(next);
+      if (!same) {
+        state = { ...state, judgeRoute: next, updatedAt: Date.now() };
+        await persist();
+        if (config.audit) {
+          await appendLedger(join(statePath, '..', 'ledger.jsonl'), {
+            at: Date.now(), kind: 'judge-route', signals: {}, before: { judgeRoute: before },
+            after: { judgeRoute: next }, transition: {},
+            evidence: next
+              ? `判定通道改为 ${next.provider}/${next.model}`
+              : '判定通道改为跟随会话模型',
+          }).catch?.(() => {});
+        }
+      }
+      return { ok: true, value: { judgeRoute: state.judgeRoute ?? null, changed: !same } };
     },
     async toggle(payload) {
       const next = { ...state.enabled };

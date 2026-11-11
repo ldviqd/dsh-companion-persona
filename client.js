@@ -472,6 +472,73 @@ window.__ModuleLoader__.load({
         ]));
       }
 
+      // 判定通道
+      //
+      // 为什么需要这个：事件判定默认跟随会话模型，但 config 里可以写死一条通道。
+      // 写死的好处是判定稳定、不受主对话换模型影响；坏处是那条通道故障时
+      // 判定全挂，而界面上看不出来。给个下拉框，两边都能选。
+      {
+        const cur = data.judgeRoute;
+        const eff = data.judgeEffective;
+        const models = data.judgeModels ?? [];
+        const curKey = cur ? `${cur.provider}/${cur.model}` : '';
+
+        children.push(h('div', { key: 'jr-h', style: C.h }, '事件判定通道'));
+        children.push(h('div', { key: 'jr-sub', style: C.sub },
+          '用哪个模型判断"这句话是什么类型的情感事件"。判定走异步旁路，不影响对话速度。'));
+
+        const options = [h('option', { key: '__follow', value: '' }, '跟随会话模型')];
+        for (const m of models) {
+          options.push(h('option', {
+            key: `${m.provider}/${m.model}`,
+            value: `${m.provider}/${m.model}`,
+          }, m.name && m.name !== m.model ? `${m.name}` : m.model));
+        }
+
+        children.push(h('div', { key: 'jr-row', style: C.card }, [
+          h('div', { key: 'sel', style: C.row }, [
+            h('div', { key: 'l', style: { ...C.name, width: 84 } }, '判定用'),
+            h('select', {
+              key: 's', style: { ...C.select, flex: '1 1 auto' },
+              value: curKey,
+              onChange: async (e) => {
+                const v = e.target.value;
+                try {
+                  if (v === '') {
+                    await callRpc('judge-route', { follow: true });
+                  } else {
+                    const idx = v.lastIndexOf('/');
+                    await callRpc('judge-route', {
+                      provider: v.slice(0, idx),
+                      model: v.slice(idx + 1),
+                    });
+                  }
+                  await load();
+                } catch (err) { setError(err?.message ?? String(err)); }
+              },
+            }, options),
+          ]),
+          // 当前实际生效的通道
+          h('div', { key: 'eff', style: { ...C.sub, marginTop: 6, marginBottom: 0 } },
+            eff ? `当前生效：${eff.provider}/${eff.model}`
+                : '当前生效：未知（没有可用的模型路由）'),
+          data.judgeError
+            ? h('div', { key: 'err', style: { ...C.sub, marginTop: 4, marginBottom: 0, color: '#d1242f' } },
+                `模型列表获取失败：${data.judgeError}`)
+            : null,
+          models.length === 0 && !data.judgeError
+            ? h('div', { key: 'none', style: { ...C.sub, marginTop: 4, marginBottom: 0 } },
+                '没有列出可选模型 —— 会回落到配置文件里的通道。')
+            : null,
+          // 写死通道时提醒：该通道出问题判定会一直降级
+          cur
+            ? h('div', {
+                key: 'pin', style: { ...C.sub, marginTop: 4, marginBottom: 0, opacity: 0.75 },
+              }, '已写死该通道：它不可用时判定会降级到关键词规则，而不会自动跟随会话模型。')
+            : null,
+        ].filter(Boolean)));
+      }
+
       // 人格段预览（模型实际看到的内容）
       children.push(h('div', { key: 'prev-h', style: C.h }, '模型的自我认知（注入内容）'));
       if (en.inject === false) {

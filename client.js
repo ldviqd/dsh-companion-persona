@@ -481,8 +481,13 @@ window.__ModuleLoader__.load({
         const cur = data.judgeRoute;
         const eff = data.judgeEffective;
         const models = data.judgeModels ?? [];
-        // 回显：按 provider+model 精确匹配，找不到就空（跟随）
-        const curIdx = cur
+        // 回显：
+        //   follow:true        → 选中「跟随会话模型」
+        //   {provider, model}  → 按精确匹配找索引
+        //   null（未选择）      → 也显示「跟随会话模型」，因为此时生效的是
+        //                        配置文件或会话模型，不是用户选的具体通道
+        const isFollow = cur?.follow === true;
+        const curIdx = (!isFollow && cur?.provider)
           ? models.findIndex((m) => m.provider === cur.provider && m.model === cur.model)
           : -1;
         const curKey = curIdx >= 0 ? `i:${curIdx}` : '';
@@ -546,13 +551,21 @@ window.__ModuleLoader__.load({
           //
           // 早先写的是「已写死该通道：它不可用时……」，"写死"读起来像出了故障，
           // 实际只是"你选定了、不再自动切换"。改成陈述状态 + 说清如何恢复。
-          cur
-            ? h('div', {
-                key: 'pin', style: { ...C.sub, marginTop: 4, marginBottom: 0, opacity: 0.75 },
-              }, `已锁定 ${cur.provider}/${cur.model}。`
-                + '该通道不可用时会降级到关键词规则，不会自动改用会话模型；'
-                + '选「跟随会话模型」可恢复自动切换。')
-            : null,
+          // 只有锁定具体通道时才提示。
+          //   follow:true → 正在跟随，无需警告
+          //   null        → 未选择，走配置文件；也说一句，否则用户不知道实际在用哪条
+          isFollow
+            ? null
+            : (cur?.provider
+                ? h('div', {
+                    key: 'pin', style: { ...C.sub, marginTop: 4, marginBottom: 0, opacity: 0.75 },
+                  }, `已锁定 ${cur.provider}/${cur.model}。`
+                    + '该通道不可用时会降级到关键词规则，不会自动改用会话模型；'
+                    + '选「跟随会话模型」可恢复自动切换。')
+                : h('div', {
+                    key: 'pin-cfg', style: { ...C.sub, marginTop: 4, marginBottom: 0, opacity: 0.75 },
+                  }, '未在面板选择：当前使用配置文件里的判定通道。'
+                    + '选「跟随会话模型」可改为跟随当前会话的模型。')),
         ].filter(Boolean)));
       }
 

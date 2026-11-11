@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.10.12
+
+Full re-trace of the judgment path. Two defects, both long-standing.
+
+### ① "Follow the session model" did not follow
+
+`judgeRoute` used `null` for two different states: *never chosen* and *chose follow*.
+Because they were indistinguishable, choosing 「跟随会话模型」 left the flow to continue
+into the config branch, where a hardcoded value intercepted it:
+
+```js
+// 0) panel choice  — null, skipped
+// 1) config        — judgeProvider/judgeModel set → returned   ← stopped here
+// 2) follow session — unreachable
+```
+
+Reported symptom: user selected follow, panel still showed `qodercn/dfmodel`. It was
+telling the truth about what actually ran.
+
+Fixed by making follow explicit — `{ follow: true }` — a state that can be told apart
+from *never chosen* and that **overrides** the config branch. `null` now means only
+"not chosen, use config".
+
+### ② An empty response was reported as a format error
+
+When the gateway rate-limited, it returned HTTP 502 with an empty body. The adapter
+emitted no `text-delta`, so `raw` was `''`, and the code recorded:
+
+```
+unparsable-output:            ← blank after the colon
+```
+
+That reads as "the model returned something we could not parse" and sent me looking at
+the prompt for several rounds. The real cause was that the call returned **nothing at
+all**. Empty responses now raise `EmptyResponseError` and are recorded as:
+
+```
+empty-response: 适配器没有返回任何文本（常见原因：网关限流 502、凭据失效、或模型只产出了 reasoning）
+```
+
+Genuine format failures still report `unparsable-output` — the two are different
+faults and should not share a label.
+
+### Current external blocker
+
+`qodercn/dfmodel` is quota-limited until 2026-11-12 00:00 (Qoder CN account pool
+exhausted). Judgment will keep degrading to keyword rules until then. That is the
+gateway, not this code.
+
+e2e 174 → **183 assertions**.
+
 ## 0.10.11
 
 The pinned-channel notice read like an error.

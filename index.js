@@ -244,12 +244,25 @@ export async function apply(ctx, config) {
 
   /** 解析本次判定该用哪个路由：显式配置 > 当前 agent > 任意已知 agent > 让宿主默认 */
   function pickRoute(agentHint) {
-    // 0) 面板选择优先 —— 用户在界面上选的判定通道
+    // ── 判定通道的三态 ──
     //
-    // null 表示「跟随会话模型」，此时继续往下走到 ②/③。
-    // 这一层放在 config 之前，是为了让「换判定模型」即时生效，不用改配置重启。
+    //   state.judgeRoute 为 { follow: true }   → 强制跟随会话模型（覆盖配置）
+    //   state.judgeRoute 为 { provider, model } → 锁定这条通道
+    //   state.judgeRoute 为 null / undefined    → 未选择，用配置文件的值
+    //
+    // ## 为什么需要显式的 follow 标记
+    //
+    // 早先只有 null 一个"空"状态，同时表示"没选过"和"选了跟随"，
+    // 两者无法区分 —— 结果用户在面板里选「跟随会话模型」后，
+    // 因为 null 被当作"未选择"，流程继续走到配置分支，被写死的
+    // judgeProvider/judgeModel 拦下。**面板上选了跟随，实际根本没跟随。**
+    //
+    // 用 { follow: true } 把"明确要求跟随"变成一个可区分的状态，
+    // 它必须能压过配置文件，否则这个选项就是骗人的。
     const chosen = state.judgeRoute;
-    if (chosen && chosen.provider && chosen.model) {
+    const forceFollow = chosen?.follow === true;
+
+    if (chosen && !forceFollow && chosen.provider && chosen.model) {
       return {
         provider: chosen.provider,
         model: chosen.model,
@@ -257,8 +270,10 @@ export async function apply(ctx, config) {
       };
     }
 
-    // 1) 显式配置优先（用户想固定判定通道时用）
-    if (config.judgeProvider && config.judgeModel) {
+    // 1) 配置文件里的固定通道
+    //
+    // 只在用户没有明确要求跟随时才采用。选了跟随就跳过这里。
+    if (!forceFollow && config.judgeProvider && config.judgeModel) {
       // 判定通道固定为 off：这是分类任务，推理链只会让模型跑偏
       // （注意取值必须是 off —— pi-ai 的合法档位里没有 none）
       return {
@@ -882,8 +897,10 @@ export async function apply(ctx, config) {
         || payload?.provider === ''
         || payload?.provider === null;
 
+      // 跟随用 { follow: true } 而不是 null —— null 表示"未选择"，
+      // 会退回配置文件里写死的通道，等于"跟随"无效。
       const next = follow
-        ? null
+        ? { follow: true }
         : (() => {
             const provider = String(payload?.provider ?? '').trim();
             const model = String(payload?.model ?? '').trim();
@@ -904,9 +921,9 @@ export async function apply(ctx, config) {
           await appendLedger(join(statePath, '..', 'ledger.jsonl'), {
             at: Date.now(), kind: 'judge-route', signals: {}, before: { judgeRoute: before },
             after: { judgeRoute: next }, transition: {},
-            evidence: next
-              ? `判定通道改为 ${next.provider}/${next.model}`
-              : '判定通道改为跟随会话模型',
+            evidence: next?.follow
+              ? '判定通道改为跟随会话模型'
+              : (next ? `判定通道改为 ${next.provider}/${next.model}` : '判定通道已清除'),
           }).catch?.(() => {});
         }
       }

@@ -83,6 +83,14 @@ function normalizeForSilent(text) {
  * @param {string} text
  * @returns {{kind: string|null, reason: string}}
  */
+/** 适配器返回了空内容（限流/凭据/只有 reasoning）。与"格式不对"区分开。 */
+class EmptyResponseError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'EmptyResponseError';
+  }
+}
+
 export function ruleFilter(text) {
   const s = String(text ?? '').trim();
   if (s.length === 0) return { kind: 'routine', reason: 'empty', shortCircuit: true };
@@ -366,6 +374,20 @@ export function createJudge({ classify, cacheSize = 512, logger } = {}) {
         await new Promise((r) => setTimeout(r, 400));
         raw = await classify(key);
       }
+      // 空输出单独归类 —— 不要报成「格式无法解析」。
+      //
+      // 实测：网关限流时返回 HTTP 502 + 空 body，适配器的 stream 不产出任何
+      // text-delta，于是 raw 是空串。早先这种情况被记成
+      // `unparsable-output: `（冒号后空白），看起来像"模型输出格式不对"，
+      // 把排查方向引偏了好几轮 —— 真正的原因是**这次调用根本没拿到内容**。
+      if (typeof raw !== 'string' || raw.trim() === '') {
+        stats.failures++;
+        failReason = 'empty-response: 适配器没有返回任何文本'
+          + '（常见原因：网关限流 502、凭据失效、或模型只产出了 reasoning）';
+        logger?.warn?.('[persona] 判定调用返回空内容，降级为规则');
+        throw new EmptyResponseError(failReason);
+      }
+
       const { kind, valence } = parseJudgement(raw);
       if (kind) {
         stats.llmHits++;
@@ -382,9 +404,14 @@ export function createJudge({ classify, cacheSize = 512, logger } = {}) {
       failReason = `unparsable-output: ${String(raw).slice(0, 60)}`;
       logger?.warn?.(`[persona] 模型输出无法识别为标签: ${String(raw).slice(0, 40)}`);
     } catch (err) {
-      stats.failures++;
-      failReason = `model-error: ${String(err?.message ?? err).slice(0, 120)}`;
-      logger?.warn?.(`[persona] 事件判定失败，降级为规则: ${String(err?.message ?? err).slice(0, 100)}`);
+      if (err instanceof EmptyResponseError) {
+        // 已在上面计数，这里只保留 reason
+        failReason = err.message;
+      } else {
+        stats.failures++;
+        failReason = `model-error: ${String(err?.message ?? err).slice(0, 120)}`;
+        logger?.warn?.(`[persona] 事件判定失败，降级为规则: ${String(err?.message ?? err).slice(0, 100)}`);
+      }
     }
 
     // 降级：规则兜底

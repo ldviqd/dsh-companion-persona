@@ -1238,6 +1238,71 @@ console.log('=== 14m. 判定通道切换 ===');
 }
 
 // ---------------------------------------------------------------------------
+// 14n. 跟随会话必须真的跟随 + 空响应不许伪装成格式错（v0.10.12）
+//
+//     两个实测 bug：
+//       ① 面板选「跟随会话模型」不生效 —— null 同时表示"没选过"和"选了跟随"，
+//          于是被配置文件里写死的 judgeProvider/judgeModel 截胡。
+//       ② 网关限流返回 502+空 body 时，记成 `unparsable-output: `（后面空白），
+//          看起来像模型输出格式不对，把排查方向引偏。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14n. 跟随生效与错误分类 ===');
+{
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+
+  // ① follow 必须是可区分的显式状态
+  check('follow 用显式标记而非 null',
+    /follow:\s*true/.test(src), 'null 无法区分"未选择"和"选了跟随"');
+  check('forceFollow 会跳过配置分支',
+    /!forceFollow\s*&&\s*config\.judgeProvider/.test(src),
+    '跟随必须能压过配置文件');
+
+  // ② 空响应单独归类
+  {
+    const j = createJudge({ classify: async () => '' });
+    const v = await j.judge('测试空响应');
+    check('空响应报 empty-response', String(v.reason).startsWith('empty-response'),
+      String(v.reason).slice(0, 40));
+    check('空响应不再伪装成 unparsable',
+      !String(v.reason).startsWith('unparsable-output'),
+      '这是两种完全不同的故障');
+    check('空响应仍标记降级', v.degraded === true);
+  }
+
+  // 格式问题仍归 unparsable，不能被合并掉
+  {
+    const j = createJudge({ classify: async () => '今天天气不错' });
+    const v = await j.judge('测试格式');
+    check('真正的格式问题仍报 unparsable',
+      String(v.reason).startsWith('unparsable-output'), String(v.reason).slice(0, 40));
+  }
+
+  // 三态语义自检（复刻 pickRoute 的判定顺序）
+  {
+    const resolve = ({ judgeRoute, config, agentRoute }) => {
+      const chosen = judgeRoute;
+      const forceFollow = chosen?.follow === true;
+      if (chosen && !forceFollow && chosen.provider && chosen.model) return 'panel';
+      if (!forceFollow && config?.provider && config?.model) return 'config';
+      if (agentRoute?.provider) return 'session';
+      return 'none';
+    };
+    const config = { provider: 'qodercn', model: 'dfmodel' };
+    const agentRoute = { provider: 'our-free-model', model: 'deepseek-v4-pro' };
+
+    check('未选择 → 用配置', resolve({ judgeRoute: null, config, agentRoute }) === 'config');
+    check('选了跟随 → 真的跟随会话',
+      resolve({ judgeRoute: { follow: true }, config, agentRoute }) === 'session');
+    check('锁定模型 → 用面板选择',
+      resolve({
+        judgeRoute: { provider: 'trae', model: 'x' }, config, agentRoute,
+      }) === 'panel');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 15. 角色设定（v0.7）
 //
 //     之前 renderPersona 只输出"性情还没有明显变化"，等于告诉模型"你没有性格"，

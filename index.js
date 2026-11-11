@@ -250,7 +250,7 @@ export async function apply(ctx, config) {
       return {
         provider: config.judgeProvider,
         model: config.judgeModel,
-        reasoningEffort: 'none',
+        reasoningEffort: 'off',
       };
     }
     // 2) 当前 session 所属 agent 的路由
@@ -294,7 +294,7 @@ export async function apply(ctx, config) {
         // 这类输出解析不出标签，整条降级到词典。
         //
         // 分类任务不需要推理链 —— 关掉后 reasoning=0，输出稳定为两行标签。
-        reasoningEffort: 'none',
+        reasoningEffort: 'off',
       });
       // collectStream 顺带捕获 { type:'usage' } chunk —— 只统计本插件的调用，
       // 与 DSH 全局用量分开，才能看出"人格功能花了多少"。
@@ -609,7 +609,7 @@ export async function apply(ctx, config) {
                 temperature: 0,
                 // 同 judge：分类任务不需要推理链。不关思考会开始评论内容，
                 // 输出解析不出标签 → 退回规则 → 误把锚点判成已解决（不可恢复）。
-                reasoningEffort: 'none',
+                reasoningEffort: 'off',
               });
               const out = await collectStream(chunks, (usage) => {
                 usageMeter.record('anchor-resolve', usage, {

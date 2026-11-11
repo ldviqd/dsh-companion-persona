@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.10.8
+
+The reasoning-disable fix in 0.10.7 did not work. The value was wrong.
+
+### `'none'` is not a thinking level
+
+0.10.7 passed `reasoningEffort: 'none'`. pi-ai's vocabulary is:
+
+```js
+EXTENDED_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+```
+
+`'none'` is not in it, so `clampThinkingLevel` does:
+
+```js
+const requestedIndex = EXTENDED_THINKING_LEVELS.indexOf('none');   // -1
+if (requestedIndex === -1) return availableLevels[0] ?? "off";     // falls to the FIRST level
+```
+
+First available level, not `off`. So the plugin was silently asking for the model's
+**default — usually the highest** — thinking level while believing it had disabled it.
+Measured effect: reasoning went up, not down.
+
+The correct value is `'off'`, which takes the intended path:
+
+```
+reasoningEffort='off'
+  → streamSimple maps it to undefined
+  → openai-completions deepseek branch, no effort
+  → params.thinking = { type: 'disabled' }
+```
+
+### How this was found
+
+Not by reading configuration. I had wrongly inferred `model.reasoning === false` from
+the profile, which has no capability declaration — but pi-ai resolves capabilities from
+its installed catalog, not from the YAML. Probing the gateway directly showed the model
+does accept `reasoning_effort`: `'none'` gave 0 reasoning characters, `'low'`/`'high'`
+gave 120-147. So the capability existed; only our value was wrong.
+
+Only the plugin's own calls change. Provider configuration and the model picker are
+untouched — the global route keeps whatever default it had.
+
+### Guarded against recurrence
+
+The regression test now asserts `reasoningEffort: 'off'` **and** explicitly fails if
+`'none'` appears anywhere in the source, since a wrong-but-plausible value is exactly
+what slipped through last time.
+
+e2e 156 → **157 assertions**.
+
 ## 0.10.7
 
 Judgment was falling back to keyword rules on every turn. The cause was a missing

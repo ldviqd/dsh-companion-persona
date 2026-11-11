@@ -1146,9 +1146,17 @@ console.log('=== 14l. 判定调用关闭思考 ===');
     .map((m) => m[0]);
   check('有两个真实 LLM 调用点', calls.length === 2, `${calls.length} 个`);
 
+  //
+  // 注意取值必须是 'off'，不是 'none'。
+  //
+  // pi-ai 的 EXTENDED_THINKING_LEVELS 是
+  //   ["off","minimal","low","medium","high","xhigh","max"]
+  // —— 没有 'none'。传 'none' 会被 clampThinkingLevel 拿去查 indexOf 得到 -1，
+  // 然后 return availableLevels[0]，也就是**回落到默认档（往往是最高档）**。
+  // 实测踩过：传 none 时 reasoning 不减反增。
   let guarded = 0;
   for (const c of calls) {
-    if (/reasoningEffort:\s*'none'/.test(c)) guarded++;
+    if (/reasoningEffort:\s*'off'/.test(c)) guarded++;
   }
   check('每个调用点都关闭了思考', guarded === calls.length,
     `${guarded}/${calls.length}`);
@@ -1161,9 +1169,13 @@ console.log('=== 14l. 判定调用关闭思考 ===');
   }
   check('maxTokens 给足（≥48）', enough === calls.length, `${enough}/${calls.length}`);
 
-  // pickRoute 的显式配置分支也要带 none
-  check('显式判定路由带 none', /judgeModel,[\s\S]{0,120}reasoningEffort:\s*'none'/.test(src),
+  // pickRoute 的显式配置分支也要带 off
+  check('显式判定路由带 off', /judgeModel,[\s\S]{0,160}reasoningEffort:\s*'off'/.test(src),
     '固定判定通道时也应关闭思考');
+
+  // 守死取值：'none' 不是合法档位，出现即错
+  check("不使用非法档位 'none'", !/reasoningEffort:\s*'none'/.test(src),
+    "pi-ai 的合法值是 off，不是 none");
 }
 
 // ---------------------------------------------------------------------------

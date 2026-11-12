@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.10.15
+
+The constraint moves out of `system` and into the user turn.
+
+### The finding
+
+`qodercn/dmodel` through this adapter **ignores the system prompt entirely**. The same
+sentence with the same parameters, where system carried 「只输出两行 kind=X valence=Y」,
+came back as chat five times out of five:
+
+```
+"抱歉，我没理解你指的是哪家公司…"
+"对不起，我还没有学会回答这个问题…"
+```
+
+Verified directly against the gateway — no DSH, no adapter in the path — so the system
+prompt is being dropped upstream, not by this plugin. Twenty minutes earlier the identical
+call returned `kind=0 valence=0`, so it is intermittent rather than deterministic.
+
+Moving the same constraint into the user turn, with no `system` field at all:
+
+```
+3/3  → kind=routine
+valence=-0.2
+```
+
+and across five different inputs: support / conflict / betrayal / loss all labelled
+correctly. A separator marks where the text under analysis begins, so the model does not
+treat the sentence as a new instruction.
+
+Both call sites changed — event judgment and anchor resolution. The anchor one matters
+more: if it loses its constraint it can read 「出院手续还没办」 as *resolved*, which is not
+recoverable.
+
+### Effort, resolved
+
+Settled after three wrong answers. The values tried:
+
+| sent | outcome |
+|---|---|
+| `off` | in `THINKING_LEVELS` → strict validation → model never declared it → rejected |
+| `disabled` | not in `THINKING_LEVELS`, but fails the adapter's level match → rejected |
+| **`none`** | not in `THINKING_LEVELS` → adapter passes it through as unknown → reaches the gateway → works |
+
+`none` is the *wire* value, declared in the adapter's own `effortOffPatch`:
+
+```js
+efforts: ['disabled', 'low', 'high', 'max']
+effortOffPatch: { reasoning_effort: 'none' }
+```
+
+The UI's 「关闭思考」 selects the `disabled` level and the adapter converts it to
+`reasoning_effort: 'none'`. Passing the wire value directly is what gets through the
+validation layer.
+
+e2e 187 → **190 assertions**.
+
 ## 0.10.14
 
 Two bugs, and they hid each other.

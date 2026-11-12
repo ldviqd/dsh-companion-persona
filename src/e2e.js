@@ -1156,7 +1156,7 @@ console.log('=== 14l. 判定调用关闭思考 ===');
   // 实测踩过：传 none 时 reasoning 不减反增。
   let guarded = 0;
   for (const c of calls) {
-    if (/reasoningEffort:\s*'off'/.test(c)) guarded++;
+    if (/reasoningEffort:\s*(?:JUDGE_EFFORT|'none')/.test(c)) guarded++;
   }
   check('每个调用点都关闭了思考', guarded === calls.length,
     `${guarded}/${calls.length}`);
@@ -1177,18 +1177,17 @@ console.log('=== 14l. 判定调用关闭思考 ===');
   check("不使用非法档位 'none'", !/reasoningEffort:\s*'none'/.test(src),
     "pi-ai 的合法值是 off，不是 none");
 
-  // 判定档位：先问模型支持什么，只挑真正的"关闭"档；没有就不传。
+  // 判定档位必须是 wire 值 'none'，不是档位名。
   //
-  // 两个实测坑，方向相反：
-  //   · 固定传 'off' → pi-ai 检查档位列表，不在里面就抛
-  //     UNSUPPORTED_REASONING_EFFORT，每条判定必失败。
-  //   · 只查能力不兜底 → our-free-model 报的是 light/balanced/deep，
-  //     匹配不上就返回 null → 不传 → 模型自由思考 500~5600 字 → 跑偏成回复用户。
-  // 现在的做法是查能力 + 匹配不到就不传（传错比不传糟得多）。
-  check('判定档位来自能力查询', /resolveJudgeEffort/.test(src),
-    '不能写死一个可能不被支持的值');
-  check('匹配不到的档位不乱传', /同步不传|不传 effort|picked = null/.test(src)
-    || /let picked = null/.test(src));
+  // 三个实测坑，全都撞过：
+  //   · 'off'      → 在 DSH 的 THINKING_LEVELS 里 → 触发严格校验 → 模型没声明该档 → 拒绝
+  //   · 'disabled' → 不在 THINKING_LEVELS，但要过适配器的档位匹配 → 模型无声明 → 拒绝
+  //   · 'none'     → 不在 THINKING_LEVELS → 适配器当未知值放过 → 原样到网关 → 生效
+  //
+  // 'none' 是 our-free-model 的 effortOffPatch 里定义的 wire 值：
+  //   effortOffPatch: { reasoning_effort: 'none' }
+  check('判定档位是 wire 值 none', /JUDGE_EFFORT = 'none'/.test(src),
+    '档位名会被校验拒绝，wire 值才能穿过');
 }
 
 // ---------------------------------------------------------------------------
@@ -1334,6 +1333,34 @@ console.log('=== 14n. 跟随生效与错误分类 ===');
         judgeRoute: { provider: 'trae', model: 'x' }, config, agentRoute,
       }) === 'panel');
   }
+}
+
+// ---------------------------------------------------------------------------
+// 14o. 约束必须放 user（v0.10.15）
+//
+//     实测：qodercn/dmodel 这条链路**完全无视 system**。同一句话、同样参数，
+//     system 里写"只输出两行 kind=X"，连跑 5 次全部回成聊天内容。
+//     把约束拼进 user、不传 system → 3/3 稳定输出 kind=routine。
+// ---------------------------------------------------------------------------
+
+console.log();
+console.log('=== 14o. 约束放 user 而非 system ===');
+{
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+
+  // 判定的请求体不能再用 system 字段
+  const judgeBlock = src.slice(src.indexOf('const userContent ='),
+    src.indexOf('const userContent =') + 900);
+  check('判定把约束拼进 user', judgeBlock.includes('CLASSIFIER_PROMPT'),
+    'userContent 应包含完整的分类约束');
+  check('判定不再传 system 字段', !/system:\s*CLASSIFIER_PROMPT/.test(judgeBlock),
+    '这条链路会丢 system');
+  check('user 里带明确分隔', /待判定文本/.test(judgeBlock),
+    '约束和正文之间要有标记，避免模型把正文当指令');
+
+  // 锚点判定同理
+  check('锚点判定也走 user',
+    /resolveUser/.test(src) && !/system:\s*RESOLVE_PROMPT/.test(src));
 }
 
 // ---------------------------------------------------------------------------

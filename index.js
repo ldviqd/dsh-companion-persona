@@ -262,47 +262,35 @@ export async function apply(ctx, config) {
    * 不传最多是思考没关掉，不会让整次调用失败。
    */
   /**
-   * 判定用的思考档位。
+   * 判定用：直接发 none 关闭思考。
    *
-   * ## 这条路径踩过两次坑，都是"想当然"造成的
+   * ## 为什么是 'none'
    *
-   * 1. 固定传 'off'：pi-ai 的 resolveReasoningLevel 会检查该值是否在模型声明的
-   *    档位列表里，不在就抛 UNSUPPORTED_REASONING_EFFORT。our-free-model 的
-   *    adapter 报的是 light/balanced/deep —— 没有 off，于是每次判定都抛错。
+   * 绕了很远才搞明白：'none' 不是档位名，是 **wire 值**（发给网关的参数值）。
+   * our-free-model 的 catalog 里写得很清楚：
    *
-   * 2. 查能力再匹配别名：别名表 ['off','disabled','none','minimal'] 同样匹配不上
-   *    light/balanced/deep，返回 null → 不传 effort → 模型自由思考 → 跑偏成
-   *    回复用户（实测 500~5600 字推理）。
+   *   efforts: ['disabled', 'low', 'high', 'max']
+   *   effortOffPatch: { reasoning_effort: 'none' }
    *
-   * ## 现在的做法
+   * 也就是说界面上的"关闭思考"选中 disabled 档，插件再把它转成
+   * reasoning_effort: 'none' 发出去。
    *
-   * 问模型支持什么：
-   *   - 有真正的"关闭"档（off/disabled/none/minimal）→ 用它
-   *   - 没有 → **不传**，让模型用默认档；同时靠 maxTokens 压住输出长度，
-   *     并在解析失败时明确报 unparsable（而不是伪装成空响应）
+   * 而 DSH 的档位校验（resolveReasoningLevel）只认 THINKING_LEVELS：
+   *   off / minimal / low / medium / high / xhigh / max
    *
-   * 传一个不被支持的值，比不传糟得多 —— 前者让整条判定必失败。
+   * 于是：
+   *   · 传 'off'      → 在 THINKING_LEVELS 里 → 严格校验 → 模型没声明该档 → 拒绝
+   *   · 传 'disabled' → 不在 THINKING_LEVELS 里 → 但要过适配器的档位匹配 → 拒绝
+   *   · 传 'none'     → 不在 THINKING_LEVELS 里 → 适配器当未知值放过 → 原样到网关 → 生效
+   *
+   * 实测：none 使 reasoning 归零；不传则有数百到数千字推理，且模型容易
+   * 跑偏成"回复用户"而不是打标签。
+   *
+   * 这是**穿过校验层**的做法，不是干净的做法。但在这套适配器下它是唯一
+   * 能让判定关掉思考又不出错的值。若将来适配器修好档位声明，应改回
+   * 走 declared menu 的 disabled 档。
    */
-  const OFF_NAMES = ['off', 'disabled', 'none', 'minimal'];
-  const effortCache = new Map();
-
-  async function resolveJudgeEffort(provider, model) {
-    const key = `${provider}/${model}`;
-    if (effortCache.has(key)) return effortCache.get(key);
-    let picked = null;
-    try {
-      const info = await ctx.llm.resolveModel?.(provider, model);
-      const efforts = info?.reasoning?.efforts;
-      if (Array.isArray(efforts) && efforts.length > 0) {
-        const ids = efforts.map((e) => (typeof e === 'string' ? e : e?.id)).filter(Boolean);
-        for (const name of OFF_NAMES) {
-          if (ids.includes(name)) { picked = name; break; }
-        }
-      }
-    } catch { /* 查不到就不传 */ }
-    effortCache.set(key, picked);
-    return picked;
-  }
+  const JUDGE_EFFORT = 'none';
 
   function pickRoute(agentHint) {
     // ── 判定通道的三态 ──
@@ -372,12 +360,25 @@ export async function apply(ctx, config) {
       //
       // 传错会直接抛错（our-free-model 不认识 'off'，只认 'disabled'），
       // 那比"没关掉思考"糟得多 —— 整条判定会失败并降级。
-      const effort = await resolveJudgeEffort(route.provider, route.model);
+      const effort = JUDGE_EFFORT;
+      // ── 约束放在 user 里，不走 system ──
+      //
+      // 实测（2026-11-12）：qodercn/dmodel 经这套适配器时**完全无视 system**。
+      // 同一句话、同样的 max_tokens，system 里写"只输出两行 kind=X"，
+      // 连跑 5 次全部回成聊天内容（"抱歉，我没理解你指的是哪家公司…"）。
+      // 把同样的约束拼进 user、不传 system，3/3 稳定输出 kind=routine。
+      //
+      // 直连网关也一样，所以不是 DSH 或适配器丢字段，是这条模型链路本身
+      // 把 system 丢了。既然只能在 user 里约束，就放 user。
+      //
+      // 代价：约束和正文混在一起，模型偶尔会把正文里的句子当成新的指令。
+      // 用明确的分隔标记压住这一点。
+      const userContent = `${CLASSIFIER_PROMPT}\n\n---\n待判定文本（只分析它，不要回复它）：\n${text}`;
+
       const baseRequest = {
         provider: route.provider,
         model: route.model,
-        system: CLASSIFIER_PROMPT,
-        messages: [{ role: 'user', content: [{ type: 'text', text }] }],
+        messages: [{ role: 'user', content: [{ type: 'text', text: userContent }] }],
         // maxTokens 给足：关掉思考时约 12 token，但若适配器仍产生 reasoning，
         // 16 会被推理吃掉导致 content 为空。
         maxTokens: 64,
@@ -721,16 +722,18 @@ export async function apply(ctx, config) {
               const route = pickRoute(agentHint);
               if (!route) return null;
               const startedAt = Date.now();
+              // 同 judge：约束必须放 user。这条模型链路会无视 system，
+              // 见 judge 处的详细说明。锚点判定如果读不到约束，会把
+              // 「出院手续还没办」判成"已解决"，而那是不可恢复的错误。
+              const resolveUser = `${RESOLVE_PROMPT.replace('{ANCHOR}', anchor.summary)}\n\n---\n待判定文本：\n${txt}`;
               const chunks = ctx.llm.stream({
                 provider: route.provider,
                 model: route.model,
-                system: RESOLVE_PROMPT.replace('{ANCHOR}', anchor.summary),
-                messages: [{ role: 'user', content: [{ type: 'text', text: txt }] }],
+                messages: [{ role: 'user', content: [{ type: 'text', text: resolveUser }] }],
                 maxTokens: 48,
                 temperature: 0,
-                // 同 judge：分类任务不需要推理链。不关思考会开始评论内容，
-                // 输出解析不出标签 → 退回规则 → 误把锚点判成已解决（不可恢复）。
-                reasoningEffort: 'off',
+                // 档位同 judge：传档位名会被适配器校验，传 wire 值 'none' 才能穿过。
+                reasoningEffort: JUDGE_EFFORT,
               });
               const out = await collectStream(chunks, (usage) => {
                 usageMeter.record('anchor-resolve', usage, {

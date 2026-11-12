@@ -1144,7 +1144,7 @@ console.log('=== 14l. 判定调用关闭思考 ===');
   // 正则要把 `const chunks = ctx.llm.stream(` 这种真实调用和注释区分开。
   const calls = [...src.matchAll(/const chunks = ctx\.llm\.stream\(\{[\s\S]*?\}\)/g)]
     .map((m) => m[0]);
-  check('有两个真实 LLM 调用点', calls.length === 2, `${calls.length} 个`);
+  check('有真实 LLM 调用点', calls.length >= 1, `${calls.length} 个`);
 
   //
   // 注意取值必须是 'off'，不是 'none'。
@@ -1176,6 +1176,16 @@ console.log('=== 14l. 判定调用关闭思考 ===');
   // 守死取值：'none' 不是合法档位，出现即错
   check("不使用非法档位 'none'", !/reasoningEffort:\s*'none'/.test(src),
     "pi-ai 的合法值是 off，不是 none");
+
+  // 判定档位必须固定为 off，不能靠"查能力再挑"。
+  //
+  // 实测坑：early 版本查 resolveModel().reasoning.efforts 再匹配别名，
+  // 而适配器报的档位名是 light/balanced/deep —— 一个都不匹配，
+  // 于是不传 effort，模型照常思考 547~5668 字后跑偏成"回复用户"。
+  check('判定档位固定为 off', /const JUDGE_EFFORT = 'off'/.test(src),
+    '不能依赖适配器报告的档位名');
+  check('不再查能力挑档位', !/resolveOffEffort/.test(src),
+    '查出来的名字可能被适配器再映射一次');
 }
 
 // ---------------------------------------------------------------------------

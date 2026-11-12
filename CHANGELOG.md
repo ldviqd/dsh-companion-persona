@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.10.13
+
+Judgment kept landing in the keyword fallback. The cause: the effort it sent was
+never actually applied.
+
+### What the ledger showed
+
+Every failure had the same shape — the model answering the user instead of labelling:
+
+```
+嗯嗯，我要去吃午饭啦，你要吃一点token吗
+  → "哈哈，谢谢投喂！🍚 你去吃午饭，我就在这边默默"吃"点 token 当下午茶～"
+```
+
+### Why
+
+0.10.12 resolved the effort by querying `resolveModel().reasoning.efforts` and
+picking the first name matching `['off','disabled','none','minimal']`.
+
+For `qodercn/dmodel` the adapter reports `light / balanced / deep`. No match, so it
+returned `null` and **sent no effort at all**. The model thought freely — measured
+547 to 5668 reasoning characters — and drifted into conversation. Even a name that did
+match can be remapped downstream (`off` → `light` by this adapter), so a matching name
+was not a guarantee either.
+
+### Fix
+
+Stop guessing. The gateway accepts `off` directly:
+
+```
+不传 effort → reasoning 547~5668 字，格式漂移
+传 off      → reasoning 0 字，稳定输出两行标签
+```
+
+`JUDGE_EFFORT = 'off'`, fixed. Classification maps one sentence to two labels; it does
+not need a reasoning chain. The existing rejection retry still stands — if a provider
+refuses `off`, the call is retried without it rather than failing the turn.
+
+### Also
+
+Removed the temporary diagnostic endpoints (`selftest-llm`, `probe-route`,
+`llm-trace`) and the `llm/stream` interceptor used while chasing the developer-role
+issue.
+
+e2e 183 → **185 assertions**.
+
 ## 0.10.12
 
 Full re-trace of the judgment path. Two defects, both long-standing.

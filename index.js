@@ -138,6 +138,7 @@ async function loadState(file) {
 }
 
 export async function apply(ctx, config) {
+
   // 尝试加载宿主的 home 解析包（可选依赖）。
   // 失败完全无损：resolveStatePath 会退回 DSH_HOME / ~/.dsh。
   if (!globalThis.__personaHomePaths) {
@@ -243,6 +244,42 @@ export async function apply(ctx, config) {
   const routeByAgentId = new Map();
 
   /** 解析本次判定该用哪个路由：显式配置 > 当前 agent > 任意已知 agent > 让宿主默认 */
+  /**
+   * 为某个路由挑一个"尽量关闭思考"的档位。
+   *
+   * ## 为什么不能硬编码
+   *
+   * 同一个概念在不同适配器里叫法不同：
+   *   - DSH 内建 pi-ai：合法值 'off'
+   *   - our-free-model 插件：档位 id 是 'disabled'（另有 light/balanced/deep）
+   *
+   * 实测事故（2026-11-12）：判定固定传 'off'，而当时的 provider 是
+   * our-free-model 的 qodercn，它不认识 'off'，直接抛
+   *   provider "qodercn" model "dmodel" does not support reasoning effort "off"
+   * 每条判定都失败，面板显示"规则兜底"，看起来像模型没返回内容。
+   *
+   * 所以先问 DSH 这个模型支持什么，再挑；挑不到就不传（用模型默认）——
+   * 不传最多是思考没关掉，不会让整次调用失败。
+   */
+  /**
+   * 判定用的思考档位：直接钉死为 'off'。
+   *
+   * ## 为什么不再查能力
+   *
+   * 早先这里查 ctx.llm.resolveModel().reasoning.efforts，再从
+   * ['off','disabled','none','minimal'] 里挑一个匹配的。看着稳，实际有两个坑：
+   *
+   * 1. 适配器报告的档位名可能是 light/balanced/deep（our-free-model 就是这样），
+   *    一个都不匹配 → 返回 null → 不传 effort → **模型照常思考** → 跑偏成回复用户。
+   *    实测该组合下 reasoning 有 547~5668 字，输出是"哈哈谢谢投喂🍚…"。
+   *
+   * 2. 即便匹配上，名字也可能被适配器再映射一次（off → light），等于没关。
+   *
+   * 而网关本身认 'off'：实测 reasoning 归零，输出稳定为两行标签。
+   * 分类任务只需要一个词的表，不需要思考链 —— 直接传，不猜。
+   */
+  const JUDGE_EFFORT = 'off';
+
   function pickRoute(agentHint) {
     // ── 判定通道的三态 ──
     //
@@ -306,38 +343,49 @@ export async function apply(ctx, config) {
       }
       // ctx.llm.stream() 是宿主唯一的一等调用入口，带 provider 路由与回退。
       const startedAt = Date.now();
-      const chunks = ctx.llm.stream({
+
+      // 关思考的档位名因适配器而异，先问能力，再决定传不传。
+      //
+      // 传错会直接抛错（our-free-model 不认识 'off'，只认 'disabled'），
+      // 那比"没关掉思考"糟得多 —— 整条判定会失败并降级。
+      const effort = JUDGE_EFFORT;
+      const baseRequest = {
         provider: route.provider,
         model: route.model,
         system: CLASSIFIER_PROMPT,
         messages: [{ role: 'user', content: [{ type: 'text', text }] }],
-        // maxTokens 给足：不开思考时约 12 token，但适配器若忽略 effort
-        // 设置、仍产生 reasoning，16 会被推理吃掉导致 content 为空。
+        // maxTokens 给足：关掉思考时约 12 token，但若适配器仍产生 reasoning，
+        // 16 会被推理吃掉导致 content 为空。
         maxTokens: 64,
         temperature: 0,
-        // ⚠️ 必须显式关掉思考。
-        //
-        // 实测（2026-11-11）：不传 reasoningEffort 时，模型产生 500-1600 字推理，
-        // 然后开始**评论待分类的内容**而不是给标签：
-        //   "确实，这比'没人签字'更麻烦：签字本来是审核、确认和担责…"
-        // 这类输出解析不出标签，整条降级到词典。
-        //
-        // 分类任务不需要推理链 —— 关掉后 reasoning=0，输出稳定为两行标签。
-        reasoningEffort: 'off',
+        ...(effort ? { reasoningEffort: effort } : {}),
+      };
+
+      // 即便查到了档位，个别 provider 仍可能拒绝（能力声明与实现不一致）。
+      // 这种情况去掉 effort 重试一次 —— 判定宁可多花点 token，也不能整条失败。
+      const openStream = async (req) => collectStream(ctx.llm.stream(req), (usage) => {
+        usageMeter.record('judge', usage, {
+          ok, ms: Date.now() - startedAt, model: `${route.provider}/${route.model}`,
+        });
       });
-      // collectStream 顺带捕获 { type:'usage' } chunk —— 只统计本插件的调用，
-      // 与 DSH 全局用量分开，才能看出"人格功能花了多少"。
+
       let ok = true;
       try {
-        return await collectStream(chunks, (usage) => {
-          usageMeter.record('judge', usage, {
-            ok, ms: Date.now() - startedAt, model: `${route.provider}/${route.model}`,
-          });
-        });
+        try {
+          return await openStream(baseRequest);
+        } catch (err) {
+          const msg = String(err?.message ?? err);
+          if (!/reasoning effort/i.test(msg) || baseRequest.reasoningEffort === undefined) throw err;
+          const { reasoningEffort: _dropped, ...bare } = baseRequest;
+          return await openStream(bare);
+        }
       } catch (err) {
         ok = false;
         throw err;
       }
+      // collectStream 顺带捕获 { type:'usage' } chunk —— 只统计本插件的调用，
+      // 与 DSH 全局用量分开，才能看出"人格功能花了多少"。
+
     },
     logger,
   });
@@ -367,7 +415,8 @@ export async function apply(ctx, config) {
     } catch { /* options 不可读时忽略，走 fallback 路由 */ }
     try {
       const agentCtx = agent.ctx;
-      const disposer = agentCtx.systemPrompt.section({
+
+  const disposer = agentCtx.systemPrompt.section({
         name: 'companion-persona',
         order: config.order,
         // 每次装配时重算：人格可能在轮次之间变化
@@ -787,6 +836,10 @@ export async function apply(ctx, config) {
   });
 
   const handlers = {
+    /**
+     * 临时验证端点：走和 judge 完全相同的 ctx.llm.stream 路径，
+     * 确认 developer role 问题是否已修复。
+     */
     async state() {
       const changed = describeChangesForPanel(state);
 

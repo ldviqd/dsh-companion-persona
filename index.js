@@ -262,23 +262,47 @@ export async function apply(ctx, config) {
    * 不传最多是思考没关掉，不会让整次调用失败。
    */
   /**
-   * 判定用的思考档位：直接钉死为 'off'。
+   * 判定用的思考档位。
    *
-   * ## 为什么不再查能力
+   * ## 这条路径踩过两次坑，都是"想当然"造成的
    *
-   * 早先这里查 ctx.llm.resolveModel().reasoning.efforts，再从
-   * ['off','disabled','none','minimal'] 里挑一个匹配的。看着稳，实际有两个坑：
+   * 1. 固定传 'off'：pi-ai 的 resolveReasoningLevel 会检查该值是否在模型声明的
+   *    档位列表里，不在就抛 UNSUPPORTED_REASONING_EFFORT。our-free-model 的
+   *    adapter 报的是 light/balanced/deep —— 没有 off，于是每次判定都抛错。
    *
-   * 1. 适配器报告的档位名可能是 light/balanced/deep（our-free-model 就是这样），
-   *    一个都不匹配 → 返回 null → 不传 effort → **模型照常思考** → 跑偏成回复用户。
-   *    实测该组合下 reasoning 有 547~5668 字，输出是"哈哈谢谢投喂🍚…"。
+   * 2. 查能力再匹配别名：别名表 ['off','disabled','none','minimal'] 同样匹配不上
+   *    light/balanced/deep，返回 null → 不传 effort → 模型自由思考 → 跑偏成
+   *    回复用户（实测 500~5600 字推理）。
    *
-   * 2. 即便匹配上，名字也可能被适配器再映射一次（off → light），等于没关。
+   * ## 现在的做法
    *
-   * 而网关本身认 'off'：实测 reasoning 归零，输出稳定为两行标签。
-   * 分类任务只需要一个词的表，不需要思考链 —— 直接传，不猜。
+   * 问模型支持什么：
+   *   - 有真正的"关闭"档（off/disabled/none/minimal）→ 用它
+   *   - 没有 → **不传**，让模型用默认档；同时靠 maxTokens 压住输出长度，
+   *     并在解析失败时明确报 unparsable（而不是伪装成空响应）
+   *
+   * 传一个不被支持的值，比不传糟得多 —— 前者让整条判定必失败。
    */
-  const JUDGE_EFFORT = 'off';
+  const OFF_NAMES = ['off', 'disabled', 'none', 'minimal'];
+  const effortCache = new Map();
+
+  async function resolveJudgeEffort(provider, model) {
+    const key = `${provider}/${model}`;
+    if (effortCache.has(key)) return effortCache.get(key);
+    let picked = null;
+    try {
+      const info = await ctx.llm.resolveModel?.(provider, model);
+      const efforts = info?.reasoning?.efforts;
+      if (Array.isArray(efforts) && efforts.length > 0) {
+        const ids = efforts.map((e) => (typeof e === 'string' ? e : e?.id)).filter(Boolean);
+        for (const name of OFF_NAMES) {
+          if (ids.includes(name)) { picked = name; break; }
+        }
+      }
+    } catch { /* 查不到就不传 */ }
+    effortCache.set(key, picked);
+    return picked;
+  }
 
   function pickRoute(agentHint) {
     // ── 判定通道的三态 ──
@@ -348,7 +372,7 @@ export async function apply(ctx, config) {
       //
       // 传错会直接抛错（our-free-model 不认识 'off'，只认 'disabled'），
       // 那比"没关掉思考"糟得多 —— 整条判定会失败并降级。
-      const effort = JUDGE_EFFORT;
+      const effort = await resolveJudgeEffort(route.provider, route.model);
       const baseRequest = {
         provider: route.provider,
         model: route.model,
@@ -363,11 +387,30 @@ export async function apply(ctx, config) {
 
       // 即便查到了档位，个别 provider 仍可能拒绝（能力声明与实现不一致）。
       // 这种情况去掉 effort 重试一次 —— 判定宁可多花点 token，也不能整条失败。
-      const openStream = async (req) => collectStream(ctx.llm.stream(req), (usage) => {
-        usageMeter.record('judge', usage, {
-          ok, ms: Date.now() - startedAt, model: `${route.provider}/${route.model}`,
-        });
-      });
+      // 带诊断的收集：记录收到的 chunk 类型，空响应时能看出到底哪一步断了
+      let lastChunkTypes = [];
+      const openStream = async (req) => {
+        const kinds = [];
+        let out = '';
+        let usage = null;
+        try {
+          for await (const c of ctx.llm.stream(req)) {
+            const t = c?.type ?? 'unknown';
+            if (!kinds.includes(t)) kinds.push(t);
+            if (t === 'text-delta') out += c.text;
+            else if (t === 'usage') usage = c.usage;
+          }
+        } finally {
+          lastChunkTypes = kinds.slice(0, 12);
+          usageMeter.record('judge', usage, {
+            ok, ms: Date.now() - startedAt, model: `${route.provider}/${route.model}`,
+          });
+        }
+        if (out.trim() === '' && lastChunkTypes.length > 0) {
+          logger?.warn?.(`[persona] 判定空响应，chunk=${JSON.stringify(lastChunkTypes)}`);
+        }
+        return out;
+      };
 
       let ok = true;
       try {

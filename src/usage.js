@@ -132,14 +132,29 @@ export function createUsageMeter({ maxRecent = 50 } = {}) {
 export async function collectStream(chunks, onUsage) {
   let out = '';
   let usage = null;
+  let failure = null;
   try {
     for await (const chunk of chunks) {
       if (chunk?.type === 'text-delta') out += chunk.text;
       else if (chunk?.type === 'usage') usage = chunk.usage;
+      else if (chunk?.type === 'finish' && chunk.reason?.kind === 'error') {
+        // 适配器把失败放在 finish chunk 里，而不是抛异常。
+        //
+        // 不检查这一处会出大问题（实测踩过）：判定请求传了不被支持的
+        // reasoningEffort，适配器返回 finish{kind:'error'} 但迭代器正常结束，
+        // 于是 collectStream 返回空串，上层误判成"模型没返回内容"，
+        // 排查方向被引到限流/凭据上，实际是参数被拒。
+        failure = chunk.reason.failure ?? { message: 'stream finished with an error' };
+      }
     }
   } finally {
     // 无论成功失败都回调一次：失败时 usage 为 null，便于统计"没拿到用量"的调用
     onUsage?.(usage);
+  }
+  if (failure) {
+    const err = new Error(String(failure.message ?? failure));
+    err.code = failure.code;
+    throw err;
   }
   return out;
 }

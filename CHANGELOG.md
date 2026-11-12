@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.10.14
+
+Two bugs, and they hid each other.
+
+### ① Pinning the effort to `off` broke every call
+
+pi-ai resolves an effort by checking it against the levels the model declares:
+
+```js
+if (getSupportedThinkingLevels(model).some(level => level === effort)) return effort;
+throw new LlmError(..., 'UNSUPPORTED_REASONING_EFFORT');
+```
+
+`our-free-model` declares `light / balanced / deep`. `off` is not among them, so every
+judgment raised. 0.10.13 hardcoded `off` on the reasoning that the gateway accepts it —
+it does, but the adapter rejects the value before it ever reaches the gateway.
+
+Now: ask the model what it supports, take a real "off" level (`off`/`disabled`/`none`/
+`minimal`) if one exists, otherwise **send nothing**. Sending an unsupported value is far
+worse than sending none — the former guarantees failure.
+
+Measured with no effort at all: 3/3 correct labels despite the model thinking. Thinking
+is not fatal; a rejected parameter is.
+
+### ② The failure was reported as an empty response
+
+The adapter puts stream failures in a `finish` chunk instead of throwing. `collectStream`
+only read `text-delta`, so the iterator ended normally with `out === ''`, and the turn was
+recorded as:
+
+```
+empty-response: 适配器没有返回任何文本（常见原因：网关限流 502、凭据失效…）
+```
+
+That message sent me looking at rate limits and credentials for several rounds. The real
+cause — `UNSUPPORTED_REASONING_EFFORT` — was sitting in the finish chunk the whole time.
+
+`collectStream` now inspects `finish` and throws with the original message and code. This
+is what let the retry path work at all: an error that arrives as a normal stream ending
+cannot be caught.
+
+### Removed
+
+`probe-stream` and `probe-route` diagnostic endpoints, added while chasing this.
+
+e2e 185 → **187 assertions**.
+
 ## 0.10.13
 
 Judgment kept landing in the keyword fallback. The cause: the effort it sent was

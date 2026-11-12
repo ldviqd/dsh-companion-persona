@@ -1177,15 +1177,18 @@ console.log('=== 14l. 判定调用关闭思考 ===');
   check("不使用非法档位 'none'", !/reasoningEffort:\s*'none'/.test(src),
     "pi-ai 的合法值是 off，不是 none");
 
-  // 判定档位必须固定为 off，不能靠"查能力再挑"。
+  // 判定档位：先问模型支持什么，只挑真正的"关闭"档；没有就不传。
   //
-  // 实测坑：early 版本查 resolveModel().reasoning.efforts 再匹配别名，
-  // 而适配器报的档位名是 light/balanced/deep —— 一个都不匹配，
-  // 于是不传 effort，模型照常思考 547~5668 字后跑偏成"回复用户"。
-  check('判定档位固定为 off', /const JUDGE_EFFORT = 'off'/.test(src),
-    '不能依赖适配器报告的档位名');
-  check('不再查能力挑档位', !/resolveOffEffort/.test(src),
-    '查出来的名字可能被适配器再映射一次');
+  // 两个实测坑，方向相反：
+  //   · 固定传 'off' → pi-ai 检查档位列表，不在里面就抛
+  //     UNSUPPORTED_REASONING_EFFORT，每条判定必失败。
+  //   · 只查能力不兜底 → our-free-model 报的是 light/balanced/deep，
+  //     匹配不上就返回 null → 不传 → 模型自由思考 500~5600 字 → 跑偏成回复用户。
+  // 现在的做法是查能力 + 匹配不到就不传（传错比不传糟得多）。
+  check('判定档位来自能力查询', /resolveJudgeEffort/.test(src),
+    '不能写死一个可能不被支持的值');
+  check('匹配不到的档位不乱传', /同步不传|不传 effort|picked = null/.test(src)
+    || /let picked = null/.test(src));
 }
 
 // ---------------------------------------------------------------------------
@@ -1279,6 +1282,27 @@ console.log('=== 14n. 跟随生效与错误分类 ===');
       !String(v.reason).startsWith('unparsable-output'),
       '这是两种完全不同的故障');
     check('空响应仍标记降级', v.degraded === true);
+  }
+
+  // collectStream 必须检查 finish 里的错误。
+  //
+  // 适配器把失败放在 finish chunk 而不是抛异常。不检查的话迭代器正常结束，
+  // 返回空串，上层误判成"模型没返回内容"（empty-response），
+  // 把排查方向引到限流/凭据上，实际是参数被拒。
+  {
+    async function* fakeErrorStream() {
+      yield { type: 'finish', reason: { kind: 'error', failure: { message: 'provider rejected reasoning effort "off"', code: 'UNSUPPORTED_REASONING_EFFORT' } } };
+    }
+    let threw = false;
+    let msg = '';
+    try {
+      await collectStream(fakeErrorStream());
+    } catch (e) {
+      threw = true;
+      msg = String(e?.message ?? e);
+    }
+    check('finish 里的错误必须抛出', threw, threw ? msg.slice(0, 50) : '被当成空响应吞掉了');
+    check('抛出的错误保留原始信息', /reasoning effort/.test(msg), msg.slice(0, 50));
   }
 
   // 格式问题仍归 unparsable，不能被合并掉
